@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v25';
+const APP_VERSION = 'circuitnet-v28';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -103,7 +103,8 @@ const SB_REST    = SUPABASE_URL + '/rest/v1';
 // These functions convert between camelCase (app) and lowercase (Supabase).
 var CAMEL_COLS = {
   'badgeid':'badgeId','eventid':'eventId','eventname':'eventName',
-  'rawbadgedata':'rawBadgeData','visitortype':'visitorType',
+  'rawbadgedata':'rawBadgeData','rawocrdata':'rawOcrData','capturedate':'captureDate',
+  'visitortype':'visitorType',
   'leadsource':'leadSource','customerrequirement':'customerRequirement',
   'followup':'followUp','followupdate':'followUpDate',
   'followuptype':'followUpType','followupstatus':'followUpStatus',
@@ -1623,29 +1624,37 @@ const CardScanner = {
     });
   },
 
+  /**
+   * PARSER RULES — what info goes to which field:
+   *
+   * EMAIL:      Line containing '@' and '.com/.org/.net/etc.' — always full email
+   * PHONE:      Line starting with T:/Tel:/Telephone:/Mob:/Mobile:/Ph: → extract digits
+   *             OR any line with +91 followed by 8-12 digits
+   *             OR standalone 10-digit number starting 6-9
+   * WEBSITE:    Line starting with 'www.' or 'http' → take first URL (split by |)
+   *             OR line starting with W:/Web:/Website: → take value after label
+   * DESIGNATION: First unused line (no @, no digits) containing keywords:
+   *             Manager, Director, CEO, Analyst, Engineer, Consultant, Supply Chain, etc.
+   *             Max 60 chars. Strip leading non-alpha chars.
+   * COMPANY:    Lines containing: Ltd, Limited, Pvt, Technologies, Solutions, Systems,
+   *             Enterprises, Industries, Electronics, etc. Merge adjacent company lines.
+   *             Skip parenthetical lines like (A Division of...). Pick longest candidate.
+   * NAME:       First unused line with 2-4 words, all alphabetic, Title Case
+   *             (each word starts uppercase). Skip if contains company keywords.
+   *             Skip lines with digits, |, -, #, @, :.
+   * CITY:       Word-boundary match against list of 54 Indian cities
+   * COUNTRY:    Word-boundary match for 'India', 'USA', 'Singapore', etc.
+   */
   parseCardText(text) {
-    // Clean up — normalize line endings, remove OCR noise
-    var cleaned = text
-      .replace(/\r\n/g, '\n')
-      .replace(/\r/g, '\n')
-      .replace(/~/g, '')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
-
+    var cleaned = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/~/g, '').replace(/\n{3,}/g, '\n\n').trim();
     var lines = cleaned.split(/\n/).map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 1; });
-    // Remove noise lines (mostly special chars, single letters)
-    // BUT keep lines that look like labeled contact info (T:, E:, W:, Ph:, etc.) or contain phone numbers
+    // Keep lines that have useful content: labeled info, @, phone numbers, URLs, or decent letter ratio
     lines = lines.filter(function(l) {
-      // Always keep lines that look like labeled contact info
-      if (/^(T|Tel|Phone|Ph|P|Mob|Mobile|M|E|Email|W|Web|Website|URL)\s*[:\-]/i.test(l)) return true;
-      // Always keep lines containing @ (email)
+      if (/^(Telephone|Mob|Mobile|Phone|Tel|Email|Website|URL|Web|Fax|Ph|P|M|T|E|W)\s*[:\-]/i.test(l)) return true;
       if (l.indexOf('@') >= 0) return true;
-      // Always keep lines containing phone numbers (10+ digits)
       if (l.match(/\d{10,}/)) return true;
       if (l.match(/\+\d{1,3}[-\s]?\d{5,}/)) return true;
-      // Always keep lines starting with www. or http
       if (/^www\./i.test(l) || /^https?:\/\//i.test(l)) return true;
-      // For other lines, check letter ratio
       var letterCount = (l.match(/[a-zA-Z]/g) || []).length;
       if (letterCount < 2) return false;
       if (letterCount / l.length < 0.4) return false;
@@ -1653,158 +1662,133 @@ const CardScanner = {
     });
 
     var fields = {};
-    var usedLines = {}; // Track which lines we've assigned
+    var usedLines = {};
 
-    // Helper: check if a line contains any of the given keywords (case-insensitive)
     function hasKeyword(line, keywords) {
-      var lineUpper = line.toUpperCase();
-      for (var i = 0; i < keywords.length; i++) {
-        if (lineUpper.indexOf(keywords[i].toUpperCase()) >= 0) return true;
-      }
+      var u = line.toUpperCase();
+      for (var i = 0; i < keywords.length; i++) { if (u.indexOf(keywords[i].toUpperCase()) >= 0) return true; }
       return false;
     }
+    function markUsed(idx) { usedLines[idx] = true; }
+    function isUsedIdx(idx) { return !!usedLines[idx]; }
 
-    // Helper: mark a line as used
-    function markUsed(line) {
-      for (var i = 0; i < lines.length; i++) {
-        if (lines[i] === line) { usedLines[i] = true; break; }
-      }
-    }
-
-    // Helper: check if line is already used
-    function isUsed(line) {
-      for (var i = 0; i < lines.length; i++) {
-        if (lines[i] === line) return !!usedLines[i];
-      }
-      return false;
-    }
-
-    // === STEP 1: Extract labeled fields (T:, E:, W:, Ph:, Mob:, etc.) ===
-    // These are the most reliable — cards often have labeled contact info
+    // === EMAIL RULE: Full email containing @ and domain ===
     for (var i = 0; i < lines.length; i++) {
-      var line = lines[i];
-      var labelMatch = line.match(/^(T|Tel|Phone|Ph|P|Mob|Mobile|M|E|Email|W|Web|Website|URL)\s*[:\-]\s*(.+)/i);
-      if (labelMatch) {
-        var label = labelMatch[1].toLowerCase();
-        var value = labelMatch[2].trim();
-        if ((label === 't' || label === 'tel' || label === 'phone' || label === 'ph' || label === 'p' || label === 'mob' || label === 'mobile' || label === 'm') && !fields.phone) {
-          // Extract phone number from the value
-          var phoneClean = value.match(/\+?[\d\s-]{8,}/);
-          if (phoneClean) fields.phone = phoneClean[0].trim();
-          markUsed(line);
-        } else if ((label === 'e' || label === 'email') && !fields.email) {
-          // Extract email from the value
-          var emailClean = value.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-          if (emailClean) fields.email = emailClean[0];
-          markUsed(line);
-        } else if ((label === 'w' || label === 'web' || label === 'website' || label === 'url') && !fields.website) {
-          fields.website = value;
-          markUsed(line);
+      var m = lines[i].match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+      if (m) { fields.email = m[0]; markUsed(i); break; }
+    }
+
+    // === PHONE RULE: Prefer Mob/Mobile labels, then any labeled phone, then raw +91 or 10-digit ===
+    // First pass: look for Mob/Mobile labels (most likely personal mobile)
+    for (var i = 0; i < lines.length; i++) {
+      if (isUsedIdx(i)) continue;
+      var lm = lines[i].match(/^(Mob|Mobile)\s*[:\-]?\s*(.+)/i);
+      if (lm && lm[2]) {
+        var pc = lm[2].match(/\+?[\d\s-]{8,}/);
+        if (pc) { fields.phone = pc[0].trim(); markUsed(i); break; }
+      }
+    }
+    // Second pass: any labeled phone (T:, Tel:, Telephone:, Ph:, P:)
+    if (!fields.phone) {
+      for (var i = 0; i < lines.length; i++) {
+        if (isUsedIdx(i)) continue;
+        var lm = lines[i].match(/^(Telephone|Tel|Phone|Ph|P|T)\s*[:\-]\s*(.+)/i);
+        if (lm && lm[2]) {
+          var pc = lm[2].match(/\+?[\d\s-]{8,}/);
+          if (pc) { fields.phone = pc[0].trim(); markUsed(i); break; }
         }
       }
     }
-
-    // === STEP 2: Email (if not found via label) ===
-    if (!fields.email) {
-      for (var i = 0; i < lines.length; i++) {
-        var m = lines[i].match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-        if (m) { fields.email = m[0]; markUsed(lines[i]); break; }
-      }
-    }
-
-    // === STEP 3: Phone (if not found via label) ===
+    // Third pass: raw phone number anywhere in text
     if (!fields.phone) {
       var allText = lines.join(' ');
-      var phoneMatch = allText.match(/\+?91[-\s]?\d{5}[-\s]?\d{5}/);
-      if (phoneMatch) {
-        fields.phone = phoneMatch[0].trim();
-      } else {
-        phoneMatch = allText.match(/(?:^|\s)([6-9]\d{9})(?:\s|$)/);
-        if (phoneMatch) fields.phone = phoneMatch[1];
-      }
+      var pm = allText.match(/\+91[\s-]?\d{2,4}[\s-]?\d{3,5}[\s-]?\d{2,5}/);
+      if (pm) fields.phone = pm[0].trim();
+      if (!fields.phone) { pm = allText.match(/\+?91[\s-]?\d{5}[\s-]?\d{5}/); if (pm) fields.phone = pm[0].trim(); }
+      if (!fields.phone) { pm = allText.match(/(?:^|\s)([6-9]\d{9})(?:\s|$)/); if (pm) fields.phone = pm[1]; }
     }
 
-    // === STEP 4: Website (if not found via label) ===
-    // Only accept lines that look like actual URLs: start with www. or http
+    // === WEBSITE RULE: Line starting with www. or http, take first URL if pipe-separated ===
+    for (var i = 0; i < lines.length; i++) {
+      if (isUsedIdx(i)) continue;
+      if (/^www\./i.test(lines[i]) || /^https?:\/\//i.test(lines[i])) {
+        fields.website = lines[i].split('|')[0].trim();
+        markUsed(i); break;
+      }
+    }
+    // Also check W:/Web:/Website: labeled lines
     if (!fields.website) {
       for (var i = 0; i < lines.length; i++) {
-        var line = lines[i];
-        // Must start with www. or http to be considered a website
-        if (/^www\./i.test(line) || /^https?:\/\//i.test(line)) {
-          fields.website = line;
-          markUsed(line);
-          break;
-        }
+        if (isUsedIdx(i)) continue;
+        var lm = lines[i].match(/^(Website|URL|Web|W)\s*[:\-]\s*(.+)/i);
+        if (lm && lm[2]) { fields.website = lm[2].split('|')[0].trim(); markUsed(i); break; }
       }
     }
 
-    // === STEP 5: Designation ===
+    // === DESIGNATION RULE: First unused line with no @, no 5+ digits, containing job title keywords ===
     var designationKeywords = [
-      'Managing Director','General Manager','Vice President','Chief Executive','Chief Technology',
+      'Managing Director','General Manager','Vice President','Supply Chain','Chief Executive','Chief Technology',
       'Chief Financial','Chief Operating','Manager','Director','CEO','CTO','CFO','COO','Founder',
       'Co-Founder','Proprietor','Engineer','Consultant','Architect','Designer','Analyst','Specialist',
       'Officer','Executive','President','VP','Head','Lead','Supervisor','Coordinator','Developer',
       'Programmer','Technician','Partner','Sr.','Senior','Junior'
     ];
     for (var i = 0; i < lines.length; i++) {
-      if (isUsed(lines[i])) continue;
+      if (isUsedIdx(i)) continue;
       if (lines[i].indexOf('@') >= 0) continue;
       if (lines[i].match(/\+?\d{5,}/)) continue;
       if (hasKeyword(lines[i], designationKeywords) && lines[i].length < 60) {
         fields.designation = lines[i].replace(/^[^a-zA-Z]+/, '').trim();
-        markUsed(lines[i]);
-        break;
+        markUsed(i); break;
       }
     }
 
-    // === STEP 6: Company ===
-    // Collect ALL lines that match company keywords, then pick the LONGEST one
+    // === COMPANY RULE: Lines with Ltd/Technologies/Solutions/etc. Merge adjacent. Skip parenthetical. Pick longest. ===
     var companyKeywords = ['Pvt Ltd','Private Limited','Pvt. Ltd.','Ltd','Limited','Inc','Corp','Corporation',
       'Technologies','Solutions','Systems','Enterprises','Industries','Group','Company','Co.',
-      'LLP','LLC','GmbH','Sdn Bhd','Trading','Works','Labs','Tech','Electronics','Electricals'];
+      'LLP','LLC','GmbH','Sdn Bhd','Trading','Works','Labs','Electronics','Electricals'];
     var companyCandidates = [];
     for (var i = 0; i < lines.length; i++) {
-      if (isUsed(lines[i])) continue;
+      if (isUsedIdx(i)) continue;
       if (lines[i].indexOf('@') >= 0) continue;
       if (lines[i].match(/\+?\d{5,}/)) continue;
+      if (/^\(.*\)$/.test(lines[i])) continue; // Skip (A Division of...)
       if (hasKeyword(lines[i], companyKeywords) && lines[i].length < 80) {
-        companyCandidates.push(lines[i].replace(/^[^a-zA-Z#]+/, '').trim());
+        var candidate = lines[i].replace(/^[^a-zA-Z#]+/, '').trim();
+        // Merge with previous line if it looks like a brand name (short, no digits, not parenthetical)
+        if (i > 0 && !isUsedIdx(i-1) && lines[i-1].indexOf('@') < 0 && !lines[i-1].match(/\+?\d{5,}/) && !/^\(.*\)$/.test(lines[i-1]) && lines[i-1].length < 50 && lines[i-1].length > 1) {
+          candidate = lines[i-1].replace(/^[^a-zA-Z#]+/, '').trim() + ' ' + candidate;
+          markUsed(i-1);
+        }
+        companyCandidates.push(candidate);
       }
     }
     if (companyCandidates.length > 0) {
-      // Pick the longest candidate (most complete company name)
       companyCandidates.sort(function(a, b) { return b.length - a.length; });
       fields.company = companyCandidates[0];
-      markUsed(companyCandidates[0]);
     }
 
-    // === STEP 7: Name ===
-    // First non-used line with 2-4 words, mostly letters, not a slogan
+    // === NAME RULE: First unused line, 2-4 words, all alphabetic, Title Case, not company/slogan ===
     for (var i = 0; i < lines.length; i++) {
-      if (isUsed(lines[i])) continue;
+      if (isUsedIdx(i)) continue;
       var l = lines[i];
       if (l.indexOf('@') >= 0) continue;
       if (l.match(/\d{3,}/)) continue;
       if (l.match(/[@#:;]/)) continue;
       if (l.match(/^[#\d]/)) continue;
-      // Skip slogans
       if (l.indexOf('|') >= 0 || l.indexOf(' - ') >= 0) continue;
-      // Name pattern: 2-4 words, mostly letters
       var words = l.split(/\s+/);
       if (words.length >= 2 && words.length <= 4) {
         var allAlpha = words.every(function(w) { return /^[A-Za-z.'-]+$/.test(w); });
-        if (allAlpha) {
-          // Skip if it looks like a company
-          if (!hasKeyword(l, companyKeywords)) {
-            fields.name = l;
-            markUsed(l);
-            break;
-          }
+        if (allAlpha && !hasKeyword(l, companyKeywords)) {
+          // Must be Title Case (each word starts uppercase) — filters out taglines like "motherson d"
+          var isTitleCase = words.every(function(w) { return /^[A-Z]/.test(w); });
+          if (isTitleCase) { fields.name = l; break; }
         }
       }
     }
 
-    // === STEP 8: City (word-boundary matching) ===
+    // === CITY RULE: Word-boundary match against Indian city list ===
     var indianCities = ['Bengaluru','Bangalore','Mumbai','Delhi','New Delhi','Chennai','Hyderabad','Kolkata',
       'Pune','Ahmedabad','Gurugram','Gurgaon','Noida','Kochi','Cochin','Coimbatore','Jaipur','Lucknow',
       'Surat','Kanpur','Nagpur','Indore','Thane','Bhopal','Visakhapatnam','Vizag','Patna','Vadodara',
@@ -1814,13 +1798,10 @@ const CardScanner = {
     var allTextForCity = lines.join(' ');
     for (var j = 0; j < indianCities.length; j++) {
       var cityRegex = new RegExp('\\b' + indianCities[j].replace(/\./g, '\\.') + '\\b', 'i');
-      if (cityRegex.test(allTextForCity)) {
-        fields.city = indianCities[j];
-        break;
-      }
+      if (cityRegex.test(allTextForCity)) { fields.city = indianCities[j]; break; }
     }
 
-    // === STEP 9: Country ===
+    // === COUNTRY RULE: Word-boundary match ===
     if (/\bindia\b/i.test(allTextForCity)) {
       fields.country = 'India';
     } else {
@@ -1828,8 +1809,7 @@ const CardScanner = {
         'UAE','Dubai','Australia','Canada','France','Italy','South Korea','Taiwan','Hong Kong'];
       for (var i = 0; i < countries.length; i++) {
         if (new RegExp('\\b' + countries[i].replace(/\./g, '\\.') + '\\b', 'i').test(allTextForCity)) {
-          fields.country = countries[i];
-          break;
+          fields.country = countries[i]; break;
         }
       }
     }
@@ -1838,12 +1818,15 @@ const CardScanner = {
   },
 
   showExtractedData(fields, rawText) {
-    // Navigate to manual entry with pre-filled data
-    // Store raw OCR text separately for the debug preview
+    // Store raw OCR text and capture date for the form
+    var now = new Date();
+    var captureDate = now.toISOString().slice(0,10) + ' ' + now.toTimeString().slice(0,8);
     this.lastRawOCR = rawText;
     ManualForm.currentScanData = {
       raw: '[Visiting Card OCR] ' + rawText.substring(0, 500),
-      fields: fields
+      fields: fields,
+      ocrText: rawText,
+      captureDate: captureDate
     };
     App.navigate('manual');
     App.toggleDrawer(false);
@@ -1863,24 +1846,6 @@ const CardScanner = {
     } else {
       App.toast('Could not extract data — please enter manually', 'error');
     }
-
-    // Add a collapsible raw OCR text preview after a short delay (after form renders)
-    setTimeout(function() {
-      var container = document.getElementById('manualFormContainer');
-      if (!container) return;
-      var existing = document.getElementById('ocrDebugPreview');
-      if (existing) existing.remove();
-
-      var debugDiv = document.createElement('div');
-      debugDiv.id = 'ocrDebugPreview';
-      debugDiv.style.cssText = 'margin-top:16px;padding:12px;background:#1a1a2e;border-radius:8px;border:1px solid #333';
-      debugDiv.innerHTML =
-        '<div style="color:#aaa;font-size:12px;font-weight:600;margin-bottom:6px;cursor:pointer" onclick="var d=document.getElementById(\'ocrRawText\');d.style.display=d.style.display===\'none\'?\'block\':\'none\'">📋 Raw OCR Text (tap to toggle)</div>' +
-        '<pre id="ocrRawText" style="display:none;color:#0f0;font-size:11px;white-space:pre-wrap;word-wrap:break-word;margin:0;max-height:200px;overflow-y:auto">' +
-        (rawText.replace(/</g, '<').replace(/>/g, '>') || '(empty)') +
-        '</pre>';
-      container.appendChild(debugDiv);
-    }, 500);
   }
 };
 
@@ -1900,6 +1865,8 @@ const ManualForm = {
 
     const data = lead || (this.currentScanData ? this.currentScanData.fields : {});
     const raw = lead ? lead.rawBadgeData : (this.currentScanData ? this.currentScanData.raw : '');
+    const ocrData = lead ? (lead.rawOcrData || '') : (this.currentScanData ? (this.currentScanData.ocrText || '') : '');
+    const captureDate = lead ? (lead.captureDate || '') : (this.currentScanData ? (this.currentScanData.captureDate || '') : '');
 
     document.getElementById('manualFormContainer').innerHTML = `
       ${isEdit ? '<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px"><button class="btn btn-outline" onclick="App.navigate(\'leads\')" style="padding:10px 14px">← Back</button><h2>Edit Lead</h2></div>' : '<h2 style="margin-bottom:16px">Manual Entry</h2>'}
@@ -1943,6 +1910,14 @@ const ManualForm = {
           </select>
         </div>
         ${raw ? `<div class="form-group"><label>Raw Badge Data (preserved)</label><textarea id="f_rawBadge" rows="2" style="background:#f8f9fa" readonly>${esc(raw)}</textarea></div>` : '<input type="hidden" id="f_rawBadge" value="">'}
+        <div class="form-group">
+          <label>📅 Date of Capture</label>
+          <input type="text" id="f_captureDate" value="${esc(captureDate)}" placeholder="Auto-filled on scan" style="background:#f8f9fa" readonly>
+        </div>
+        <div class="form-group">
+          <label>📋 Raw OCR Data (from visiting card scan)</label>
+          <textarea id="f_rawOcrData" rows="4" style="background:#f8f9fa;font-size:12px" readonly>${esc(ocrData)}</textarea>
+        </div>
       </div>
 
       <div class="form-card">
@@ -2130,6 +2105,8 @@ const ManualForm = {
       linkedin: val('f_linkedin'),
       website: val('f_website'),
       rawBadgeData: val('f_rawBadge'),
+      rawOcrData: val('f_rawOcrData'),
+      captureDate: val('f_captureDate'),
       visitorType: val('f_visitorType'),
       leadSource: App.settings.leadSource,
       eventId: App.currentEvent ? App.currentEvent.id : '',
@@ -2160,6 +2137,10 @@ const ManualForm = {
       leadData.id = App.generateLeadId();
       leadData.date = App.dateStr(now);
       leadData.time = App.timeStr();
+      // If no captureDate set (manual entry without scan), use current timestamp
+      if (!leadData.captureDate) {
+        leadData.captureDate = leadData.date + ' ' + leadData.time;
+      }
       leadData.salesperson = currentUser.name;
       leadData.createdAt = now.toISOString();
       leadData.updatedAt = now.toISOString();
@@ -2594,14 +2575,16 @@ const Export = {
     const leads = await this.getFiltered();
     if (leads.length === 0) { App.toast('No leads to export with current filters', 'error'); return; }
 
-    const headers = ['Lead ID','Date','Time','Salesperson','Event','Visitor Name','Company','Designation','Mobile','Email','Country','City','Badge ID','LinkedIn','Website','Raw Badge Data','Visitor Type','Lead Source','Priority','Interest','Volume','Timeline','Customer Requirement','Follow-up','Follow-up Date','Follow-up Type','Follow-up Status','Remarks','Created At','Updated At','Synced At','Sync Status'];
+    const headers = ['Lead ID','Date','Time','Salesperson','Event','Visitor Name','Company','Designation','Mobile','Email','Country','City','Badge ID','LinkedIn','Website','Raw Badge Data','Raw OCR Data','Date of Capture','Visitor Type','Lead Source','Priority','Interest','Volume','Timeline','Customer Requirement','Follow-up','Follow-up Date','Follow-up Type','Follow-up Status','Remarks','Created At','Updated At','Synced At','Sync Status'];
 
     const rows = leads.map(l => [
       l.id||'', l.date||'', l.time||'', l.salesperson||'',
       l.eventName||'',
       l.name||'', l.company||'', l.designation||'',
       l.phone||'', l.email||'', l.country||'', l.city||'',
-      l.badgeId||'', l.linkedin||'', l.website||'', l.rawBadgeData||'', l.visitorType||'',
+      l.badgeId||'', l.linkedin||'', l.website||'', l.rawBadgeData||'',
+      l.rawOcrData||'', l.captureDate||'',
+      l.visitorType||'',
       l.leadSource||'', l.priority||'', l.interest||'',
       l.volume||'', l.timeline||'', l.customerRequirement||'',
       l.followUp||'', l.followUpDate||'', l.followUpType||'',
