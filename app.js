@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v29';
+const APP_VERSION = 'circuitnet-v30';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -198,6 +198,21 @@ const Cloud = {
     } catch (e) {
       this.log('❌ POST EXCEPTION: ' + e.message);
     }
+  },
+
+  async resetSyncStatus() {
+    this.log('Resetting all lead sync statuses to Pending...');
+    var leads = await dbGetAll('leads');
+    var count = 0;
+    for (var i = 0; i < leads.length; i++) {
+      leads[i].syncStatus = 'Pending';
+      leads[i].syncedAt = '';
+      await dbPut('leads', leads[i]);
+      count++;
+    }
+    this.log('Reset ' + count + ' leads to Pending. Syncing...');
+    App.toast('Reset ' + count + ' leads. Syncing to cloud...', 'success');
+    this.sync();
   },
 
   async fetchAll(table, orderCol) {
@@ -582,6 +597,40 @@ const App = {
     this.toast('Welcome, ' + user.name, 'success');
   },
 
+  switchLoginTab(tab) {
+    var userTab = document.getElementById('tabUserLogin');
+    var adminTab = document.getElementById('tabAdminLogin');
+    var userFields = document.getElementById('userLoginFields');
+    var adminFields = document.getElementById('adminLoginFields');
+    if (tab === 'admin') {
+      userTab.style.background = '#fff'; userTab.style.color = 'var(--text-muted)';
+      adminTab.style.background = 'var(--primary)'; adminTab.style.color = '#fff';
+      userFields.style.display = 'none';
+      adminFields.style.display = 'block';
+    } else {
+      userTab.style.background = 'var(--primary)'; userTab.style.color = '#fff';
+      adminTab.style.background = '#fff'; adminTab.style.color = 'var(--text-muted)';
+      userFields.style.display = 'block';
+      adminFields.style.display = 'none';
+    }
+  },
+
+  async doAdminLogin() {
+    var username = document.getElementById('loginAdminUser').value.trim();
+    var pass = document.getElementById('loginAdminPass').value;
+    var errEl = document.getElementById('adminLoginError');
+    errEl.textContent = '';
+    if (!username) { errEl.textContent = 'Enter admin username'; return; }
+    var users = await dbGetAll('users');
+    var user = users.find(function(u){ return u.username && u.username.toLowerCase() === username.toLowerCase() && u.active && u.role === 'admin'; });
+    if (!user) { errEl.textContent = 'Invalid admin credentials'; return; }
+    if (user.password !== pass) { errEl.textContent = 'Invalid admin credentials'; return; }
+    currentUser = user;
+    localStorage.setItem('cn_user', JSON.stringify(user));
+    this.showApp();
+    this.toast('Welcome Admin, ' + user.name, 'success');
+  },
+
   /**
    * Check for updates — fetches version.json from the server (bypassing
    * cache) and compares with the current APP_VERSION. If a newer version
@@ -635,8 +684,8 @@ const App = {
     if (html5QrCode) { try { html5QrCode.stop(); } catch(e){} html5QrCode = null; }
     document.getElementById('appScreen').style.display = 'none';
     document.getElementById('loginScreen').style.display = 'flex';
-    document.getElementById('loginPass').value = '';
-    this.populateLoginUsers();
+    var lp = document.getElementById('loginPass'); if (lp) lp.value = '';
+    var lap = document.getElementById('loginAdminPass'); if (lap) lap.value = '';
   },
 
   showApp() {
@@ -682,6 +731,7 @@ const App = {
     else if (view === 'events') Admin.renderEvents();
     else if (view === 'categories') Admin.renderCategories();
     else if (view === 'settings') Admin.renderSettings();
+    else if (view === 'datasync') { /* rendered via HTML */ }
     window.scrollTo(0, 0);
   },
 
@@ -1905,18 +1955,16 @@ const ManualForm = {
           <div class="form-group"><label>Company *</label><input type="text" id="f_company" value="${esc(data.company||'')}" placeholder="Company name"></div>
           <div class="form-group"><label>Designation</label><input type="text" id="f_designation" value="${esc(data.designation||'')}" placeholder="Job title"></div>
         </div>
-        <div class="field-row">
-          <div class="form-group">
-            <label>Mobile / Phone</label>
-            <input type="tel" id="f_phone" value="${esc(data.phone||'')}" placeholder="+91...">
-          </div>
-          <div class="form-group">
-            <label>Email</label>
-            <input type="email" id="f_email" value="${esc(data.email||'')}" placeholder="email@example.com">
-          </div>
+        <div class="form-group">
+          <label>Mobile / Phone</label>
+          <input type="tel" id="f_phone" value="${esc(data.phone||'')}" placeholder="+91...">
         </div>
         <div id="extraPhonesContainer"></div>
         <button type="button" class="add-phone-btn" onclick="ManualForm.addPhoneField()">+ Add Phone</button>
+        <div class="form-group" style="margin-top:12px">
+          <label>Email</label>
+          <input type="email" id="f_email" value="${esc(data.email||'')}" placeholder="email@example.com">
+        </div>
         <div class="field-row">
           <div class="form-group"><label>Country</label><input type="text" id="f_country" value="${esc(data.country||'India')}" placeholder="Country"></div>
           <div class="form-group"><label>City</label><input type="text" id="f_city" value="${esc(data.city||'')}" placeholder="City"></div>
@@ -1944,12 +1992,19 @@ const ManualForm = {
             ${['Visitor','VIP','Exhibitor','Press','Delegate','Speaker','Other'].map(t => `<option ${data.visitorType===t?'selected':''}>${t}</option>`).join('')}
           </select>
         </div>
-        ${raw ? `<div class="form-group"><label>Raw Badge Data (preserved)</label><textarea id="f_rawBadge" rows="2" style="background:#f8f9fa" readonly>${esc(raw)}</textarea></div>` : '<input type="hidden" id="f_rawBadge" value="">'}
+        ${raw ? `
+        <div class="form-group" style="margin-top:16px">
+          <label style="font-size:15px;font-weight:700;color:var(--primary);margin-bottom:8px">🎫 Raw Badge Data</label>
+          <div class="ocr-collapse-header" id="badgeCollapseHeader" onclick="ManualForm.toggleBadgeCollapse()">
+            <span>Tap to view / edit raw badge data</span>
+            <span class="chevron">▼</span>
+          </div>
+          <div class="ocr-collapse-body" id="badgeCollapseBody">
+            <textarea id="f_rawBadge" rows="4" placeholder="No badge data">${esc(raw)}</textarea>
+          </div>
+        </div>` : '<input type="hidden" id="f_rawBadge" value="">'}
+        <input type="hidden" id="f_captureDate" value="${esc(captureDate)}">
         <div class="form-group">
-          <label>📅 Date of Capture</label>
-          <input type="text" id="f_captureDate" value="${esc(captureDate)}" placeholder="Auto-filled on scan" style="background:#f8f9fa" readonly>
-        </div>
-        <div class="form-group" style="margin-top:20px">
           <label style="font-size:15px;font-weight:700;color:var(--primary);margin-bottom:8px">📋 Raw OCR Data — Visiting Card Scan</label>
           <div class="ocr-collapse-header" id="ocrCollapseHeader" onclick="ManualForm.toggleOcrCollapse()">
             <span>Tap to view / edit raw OCR text</span>
@@ -2077,6 +2132,14 @@ const ManualForm = {
   toggleOcrCollapse() {
     var header = document.getElementById('ocrCollapseHeader');
     var body = document.getElementById('ocrCollapseBody');
+    if (!header || !body) return;
+    header.classList.toggle('expanded');
+    body.classList.toggle('expanded');
+  },
+
+  toggleBadgeCollapse() {
+    var header = document.getElementById('badgeCollapseHeader');
+    var body = document.getElementById('badgeCollapseBody');
     if (!header || !body) return;
     header.classList.toggle('expanded');
     body.classList.toggle('expanded');
@@ -3139,9 +3202,10 @@ document.getElementById('modalOverlay').addEventListener('click', (e) => {
 });
 
 // Enter key on login
-document.getElementById('loginPass').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') App.doLogin();
-});
+var lpEl = document.getElementById('loginPass');
+if (lpEl) lpEl.addEventListener('keydown', function(e) { if (e.key === 'Enter') App.doLogin(); });
+var lapEl = document.getElementById('loginAdminPass');
+if (lapEl) lapEl.addEventListener('keydown', function(e) { if (e.key === 'Enter') App.doAdminLogin(); });
 
 // Initialize app on load
 window.addEventListener('DOMContentLoaded', () => App.init());

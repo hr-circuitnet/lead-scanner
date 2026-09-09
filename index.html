@@ -300,19 +300,41 @@ a{text-decoration:none;color:inherit}
       <p class="subtitle">Expo Lead Scanner</p>
       <div class="expo-tag">ELECTRONICA 2026 · BIEC BENGALURU · HALL 3 · STALL D15</div>
     </div>
-    <div class="form-group">
-      <label>Username</label>
-      <input type="text" id="loginUser" placeholder="Enter username" autocomplete="username">
+    <!-- Login tabs -->
+    <div style="display:flex;gap:0;margin-bottom:16px;border-radius:10px;overflow:hidden;border:2px solid var(--border)">
+      <button id="tabUserLogin" style="flex:1;padding:12px;border:none;background:var(--primary);color:#fff;font-size:14px;font-weight:600;cursor:pointer" onclick="App.switchLoginTab('user')">👤 User Login</button>
+      <button id="tabAdminLogin" style="flex:1;padding:12px;border:none;background:#fff;color:var(--text-muted);font-size:14px;font-weight:600;cursor:pointer" onclick="App.switchLoginTab('admin')">⚙️ Admin Login</button>
     </div>
-    <div class="form-group">
-      <label>Password</label>
-      <input type="password" id="loginPass" placeholder="Enter password" autocomplete="current-password">
+    <!-- User login fields -->
+    <div id="userLoginFields">
+      <div class="form-group">
+        <label>Username</label>
+        <input type="text" id="loginUser" placeholder="Enter username" autocomplete="username">
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="loginPass" placeholder="Enter password" autocomplete="current-password">
+      </div>
+      <button class="btn btn-primary btn-large" onclick="App.doLogin()">Login</button>
+      <div class="login-error" id="loginError"></div>
+      <div class="login-footer">Login is saved on this phone. Use ☰ → Logout to switch users.</div>
     </div>
-    <button class="btn btn-primary btn-large" onclick="App.doLogin()">Login</button>
-    <div class="login-error" id="loginError"></div>
-    <input type="file" id="loginImportFile" accept=".json" style="display:none" onchange="Admin.importTeamConfig(this.files[0], true); this.value='';">
-    <button class="btn btn-outline" style="width:100%;margin-top:10px;font-size:13px" onclick="document.getElementById('loginImportFile').click()">📥 Import Team Config (get users from admin)</button>
-    <div class="login-footer">Login is saved on this phone. Use ☰ → Logout to switch users.</div>
+    <!-- Admin login fields -->
+    <div id="adminLoginFields" style="display:none">
+      <div class="form-group">
+        <label>Admin Username</label>
+        <input type="text" id="loginAdminUser" placeholder="Enter admin username" autocomplete="username">
+      </div>
+      <div class="form-group">
+        <label>Admin Password</label>
+        <input type="password" id="loginAdminPass" placeholder="Enter admin password" autocomplete="current-password">
+      </div>
+      <button class="btn btn-primary btn-large" onclick="App.doAdminLogin()">Admin Login</button>
+      <div class="login-error" id="adminLoginError"></div>
+      <input type="file" id="loginImportFile" accept=".json" style="display:none" onchange="Admin.importTeamConfig(this.files[0], true); this.value='';">
+      <button class="btn btn-outline" style="width:100%;margin-top:10px;font-size:13px" onclick="document.getElementById('loginImportFile').click()">📥 Import Team Config (get users from admin)</button>
+      <div class="login-footer">Admin login gives access to Settings, Users, Events, and Data Sync.</div>
+    </div>
   </div>
 </div>
 
@@ -410,15 +432,6 @@ a{text-decoration:none;color:inherit}
     <div class="dash-section">
       <h3>Leads by Salesperson</h3>
       <div class="mini-chart" id="salespersonChart"></div>
-    </div>
-    <div class="dash-section">
-      <h3>☁️ Cloud Sync Debug</h3>
-      <div style="display:flex;gap:8px;margin-bottom:10px">
-        <button class="btn btn-primary" style="flex:1;padding:10px;font-size:13px" onclick="Cloud.testInsert()">Test POST</button>
-        <button class="btn btn-outline" style="flex:1;padding:10px;font-size:13px" onclick="Cloud.testGet()">Test GET</button>
-        <button class="btn btn-outline" style="flex:1;padding:10px;font-size:13px" onclick="Cloud.sync()">Sync Now</button>
-      </div>
-      <pre id="syncDebugLog" style="background:#1a1a2e;color:#0f0;padding:10px;border-radius:8px;font-size:11px;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all">Sync log will appear here...</pre>
     </div>
     <div class="dash-section">
       <h3>Leads by Date (Last 7 days)</h3>
@@ -567,6 +580,7 @@ a{text-decoration:none;color:inherit}
       <h3>Data Management</h3>
       <input type="file" id="importSettingsFile" accept=".json" style="display:none" onchange="Admin.importTeamConfig(this.files[0]); this.value='';">
       <button class="btn btn-primary" style="width:100%;margin-bottom:10px" onclick="document.getElementById('importSettingsFile').click()">📥 Import Team Config (users + categories)</button>
+      <button class="btn btn-outline" style="width:100%;margin-bottom:10px;background:#e8f0fe;border-color:var(--primary);font-weight:600" onclick="App.navigate('datasync')">☁️ Data Sync & Debug</button>
       <button class="btn btn-outline" style="width:100%;margin-bottom:10px" onclick="App.syncNow()">🔄 Sync Now</button>
       <button class="btn btn-outline" style="width:100%;margin-bottom:10px" onclick="App.loadDemoData()">🧪 Load Demo Data</button>
       <button class="btn btn-danger" style="width:100%" onclick="App.clearAllData()">🗑️ Clear All Data</button>
@@ -577,6 +591,28 @@ a{text-decoration:none;color:inherit}
       <div class="detail-row"><span class="dr-label">Company</span><span class="dr-value">CircuitNet Technologies</span></div>
       <div class="detail-row"><span class="dr-label">Event</span><span class="dr-value">Electronica 2026</span></div>
       <div class="detail-row"><span class="dr-label">Offline-first</span><span class="dr-value">✓ Enabled</span></div>
+    </div>
+  </div>
+
+  <!-- ===== DATA SYNC (Admin Only) ===== -->
+  <div class="view" id="view-datasync">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+      <button class="btn btn-outline" onclick="App.navigate('settings')" style="padding:10px 14px">← Back</button>
+      <h2 style="flex:1">☁️ Data Sync</h2>
+    </div>
+    <div class="form-card">
+      <h3>Cloud Sync Controls</h3>
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <button class="btn btn-primary" style="flex:1;padding:12px;font-size:13px" onclick="Cloud.sync()">🔄 Sync Now</button>
+        <button class="btn btn-outline" style="flex:1;padding:12px;font-size:13px" onclick="Cloud.testGet()">Test GET</button>
+        <button class="btn btn-outline" style="flex:1;padding:12px;font-size:13px" onclick="Cloud.testInsert()">Test POST</button>
+      </div>
+      <button class="btn btn-danger" style="width:100%;margin-bottom:12px" onclick="if(confirm('Reset all sync statuses to Pending? This will re-push all leads to cloud.')) { Cloud.resetSyncStatus(); }">🔁 Reset All Sync Statuses</button>
+    </div>
+    <div class="form-card">
+      <h3>Sync Debug Log</h3>
+      <pre id="syncDebugLog" style="background:#1a1a2e;color:#0f0;padding:10px;border-radius:8px;font-size:11px;max-height:400px;overflow-y:auto;white-space:pre-wrap;word-break:break-all">Sync log will appear here...</pre>
+      <button class="btn btn-outline" style="width:100%;margin-top:8px;font-size:12px" onclick="var el=document.getElementById('syncDebugLog'); if(el) el.textContent='Sync log will appear here...'">Clear Log</button>
     </div>
   </div>
 
