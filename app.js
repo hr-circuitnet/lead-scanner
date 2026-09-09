@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v20';
+const APP_VERSION = 'circuitnet-v21';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -1416,7 +1416,7 @@ const CardScanner = {
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;padding:20px';
     overlay.innerHTML = '<div style="font-size:48px;margin-bottom:16px">🪪</div>' +
       '<div style="font-size:18px;font-weight:600;margin-bottom:8px">Scanning Visiting Card...</div>' +
-      '<div id="cardScanStatus" style="font-size:14px;color:#aaa;margin-bottom:20px">Loading OCR engine...</div>' +
+      '<div id="cardScanStatus" style="font-size:14px;color:#aaa;margin-bottom:20px">Loading...</div>' +
       '<div style="width:200px;height:6px;background:rgba(255,255,255,.15);border-radius:3px;overflow:hidden">' +
       '<div id="cardScanProgress" style="width:0%;height:100%;background:#0d6efd;transition:width .3s"></div></div>';
     document.body.appendChild(overlay);
@@ -1431,8 +1431,14 @@ const CardScanner = {
         await this.loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js');
       }
 
+      // Preprocess the image for better OCR accuracy
+      statusEl.textContent = 'Processing image...';
+      var processedCanvas = await this.preprocessImage(file);
+      console.log('Card scan: image preprocessed, canvas size:', processedCanvas.width, 'x', processedCanvas.height);
+
+      // Run OCR with optimized parameters
       statusEl.textContent = 'Recognizing text...';
-      var result = await Tesseract.recognize(file, 'eng', {
+      var result = await Tesseract.recognize(processedCanvas, 'eng', {
         logger: function(m) {
           if (m.status === 'recognizing text') {
             var pct = Math.round(m.progress * 100);
@@ -1442,8 +1448,8 @@ const CardScanner = {
         }
       });
 
-      var rawText = result.data.text || '';
-      console.log('Card OCR result:', rawText);
+      var rawText = (result.data.text || '').trim();
+      console.log('Card OCR raw result:', rawText);
 
       // Parse the extracted text
       var fields = this.parseCardText(rawText);
@@ -1464,6 +1470,71 @@ const CardScanner = {
     }
   },
 
+  /**
+   * Preprocess image for better OCR:
+   * 1. Load into canvas
+   * 2. Scale up if small (visiting card photos from phone are often low-res)
+   * 3. Convert to grayscale
+   * 4. Increase contrast
+   * Returns a canvas element ready for Tesseract
+   */
+  preprocessImage(file) {
+    return new Promise(function(resolve, reject) {
+      var img = new Image();
+      img.onload = function() {
+        // Scale up if the image is small — target at least 1500px wide
+        var targetWidth = 1500;
+        var scale = 1;
+        if (img.width < targetWidth) {
+          scale = targetWidth / img.width;
+        }
+        var w = Math.round(img.width * scale);
+        var h = Math.round(img.height * scale);
+
+        var canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        var ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+
+        // Get pixel data for processing
+        var imageData = ctx.getImageData(0, 0, w, h);
+        var data = imageData.data;
+
+        // Convert to grayscale and calculate average brightness
+        var totalBrightness = 0;
+        for (var i = 0; i < data.length; i += 4) {
+          var gray = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
+          data[i] = gray;
+          data[i+1] = gray;
+          data[i+2] = gray;
+          totalBrightness += gray;
+        }
+        var avgBrightness = totalBrightness / (data.length / 4);
+
+        // Apply contrast enhancement
+        // Factor > 1 increases contrast. Also push brightness toward 128.
+        var contrastFactor = 1.5;
+        var brightnessAdjust = (128 - avgBrightness) * 0.5;
+        for (var i = 0; i < data.length; i += 4) {
+          var val = data[i];
+          // Apply contrast: new = (old - 128) * factor + 128 + brightnessAdjust
+          val = (val - 128) * contrastFactor + 128 + brightnessAdjust;
+          // Clamp 0-255
+          val = Math.max(0, Math.min(255, val));
+          data[i] = val;
+          data[i+1] = val;
+          data[i+2] = val;
+        }
+
+        ctx.putImageData(imageData, 0, 0);
+        resolve(canvas);
+      };
+      img.onerror = function() { reject(new Error('Failed to load image')); };
+      img.src = URL.createObjectURL(file);
+    });
+  },
+
   loadScript(src) {
     return new Promise(function(resolve, reject) {
       var s = document.createElement('script');
@@ -1475,44 +1546,84 @@ const CardScanner = {
   },
 
   parseCardText(text) {
-    var lines = text.split(/\n/).map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 1; });
+    // Clean up common OCR artifacts
+    var cleaned = text
+      .replace(/~/g, '')        // Remove tildes (common OCR noise)
+      .replace(/\|/g, 'l')      // Pipes misread as 'l'
+      .replace(/\r/g, '\n')
+      .replace(/\n{3,}/g, '\n\n') // Collapse multiple blank lines
+      .trim();
+
+    var lines = cleaned.split(/\n/).map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 1; });
     var allText = lines.join(' ');
     var fields = {};
 
     // === EMAIL ===
+    // Try to fix truncated emails — look for @ with at least some domain chars
     var emailMatch = allText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-    if (emailMatch) fields.email = emailMatch[0];
+    if (emailMatch) {
+      fields.email = emailMatch[0];
+    } else {
+      // Try to find partial email and reconstruct from website if available
+      var partialEmail = allText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]{3,}/);
+      if (partialEmail) {
+        fields.email = partialEmail[0];
+      }
+    }
 
     // === PHONE ===
-    var phoneMatch = allText.match(/(?:\+?91[-\s]?)?(?:[6-9]\d{9}|[6-9]\d{4}[-\s]?\d{5})/);
-    if (phoneMatch) fields.phone = phoneMatch[0].trim();
-    if (!fields.phone) {
-      // Try international format
-      phoneMatch = allText.match(/\+\d{1,3}[-\s]?\d{3,}[-\s]?\d{3,}/);
-      if (phoneMatch) fields.phone = phoneMatch[0].trim();
+    // Match +91 with various spacing: +91 96324 77442, +91-96324-77442, etc.
+    var phoneMatch = allText.match(/\+?91[-\s]?\d{5}[-\s]?\d{5}/);
+    if (phoneMatch) {
+      fields.phone = phoneMatch[0].trim();
+    } else {
+      // Indian mobile: 10 digits starting 6-9
+      phoneMatch = allText.match(/(?:^|\s)([6-9]\d{9})(?:\s|$)/);
+      if (phoneMatch) {
+        fields.phone = phoneMatch[1];
+      } else {
+        // International: +XX XXX XXXX+
+        phoneMatch = allText.match(/\+\d{1,3}[-\s]?\d{3,}[-\s]?\d{3,}/);
+        if (phoneMatch) fields.phone = phoneMatch[0].trim();
+      }
     }
 
     // === WEBSITE ===
-    var websiteMatch = allText.match(/(?:https?:\/\/)?(?:www\.)?([a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?(?:\/[a-zA-Z0-9._/-]*)?)/);
+    // Look for www. patterns first, then domain.com patterns
+    var websiteMatch = allText.match(/(?:https?:\/\/)?(?:www\.)?[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?(?:\/[a-zA-Z0-9._/-]*)?/);
     if (websiteMatch) {
       var url = websiteMatch[0];
-      // Exclude email domain
-      if (fields.email && url === fields.email.split('@')[1]) {
-        // It's just the email domain, skip
-      } else if (url.indexOf('.') > 0) {
+      // Exclude if it's part of an email
+      if (fields.email) {
+        var emailDomain = fields.email.split('@')[1];
+        if (emailDomain && url.indexOf(emailDomain) === 0) {
+          // URL is just the email domain — skip
+          url = null;
+        }
+      }
+      if (url && url.indexOf('.') > 0 && url.length > 4) {
         fields.website = url;
       }
     }
 
     // === DESIGNATION ===
-    var designationKeywords = ['Manager','Director','CEO','CTO','CFO','COO','Founder','Co-Founder','Proprietor',
-      'Engineer','Consultant','Architect','Designer','Analyst','Specialist','Officer','Executive',
-      'President','Vice President','VP','Head','Lead','Supervisor','Coordinator','Developer',
-      'Programmer','Technician','Partner','Director','General Manager','Sr.','Senior','Junior'];
+    var designationKeywords = [
+      'Managing Director','General Manager','Vice President','Chief Executive','Chief Technology',
+      'Chief Financial','Chief Operating','Manager','Director','CEO','CTO','CFO','COO','Founder',
+      'Co-Founder','Proprietor','Engineer','Consultant','Architect','Designer','Analyst','Specialist',
+      'Officer','Executive','President','VP','Head','Lead','Supervisor','Coordinator','Developer',
+      'Programmer','Technician','Partner','Sr.','Senior','Junior'
+    ];
     for (var i = 0; i < lines.length; i++) {
+      var lineLower = lines[i].toLowerCase();
+      // Skip lines that are clearly contact info
+      if (lines[i].indexOf('@') >= 0) continue;
+      if (lines[i].match(/\+?\d{5,}/)) continue;
+      if (lines[i].match(/^(T|E|W|Ph|Phone|Email|Web|Mob|Mobile)[:\s]/i)) continue;
       for (var j = 0; j < designationKeywords.length; j++) {
-        if (lines[i].toLowerCase().indexOf(designationKeywords[j].toLowerCase()) >= 0 && lines[i].length < 60) {
-          fields.designation = lines[i];
+        if (lineLower.indexOf(designationKeywords[j].toLowerCase()) >= 0 && lines[i].length < 60) {
+          // Clean up: remove leading symbols
+          fields.designation = lines[i].replace(/^[^a-zA-Z]+/, '').trim();
           break;
         }
       }
@@ -1522,28 +1633,32 @@ const CardScanner = {
     // === COMPANY ===
     var companyKeywords = ['Pvt Ltd','Private Limited','Pvt. Ltd.','Ltd','Limited','Inc','Corp','Corporation',
       'Technologies','Solutions','Systems','Enterprises','Industries','Group','Company','Co.',
-      'LLP','LLC','GmbH','Sdn Bhd','Trading','Works','Labs','Tech'];
+      'LLP','LLC','GmbH','Sdn Bhd','Trading','Works','Labs','Tech','Electronics','Electricals'];
     for (var i = 0; i < lines.length; i++) {
       var lineUpper = lines[i].toUpperCase();
+      // Skip lines that are clearly contact info
+      if (lines[i].indexOf('@') >= 0) continue;
+      if (lines[i].match(/\+?\d{5,}/)) continue;
+      if (lines[i].match(/^(T|E|W|Ph|Phone|Email|Web|Mob|Mobile)[:\s]/i)) continue;
+      if (fields.designation && lines[i] === fields.designation) continue;
       for (var j = 0; j < companyKeywords.length; j++) {
         if (lineUpper.indexOf(companyKeywords[j].toUpperCase()) >= 0 && lines[i].length < 80) {
-          fields.company = lines[i];
+          fields.company = lines[i].replace(/^[^a-zA-Z#]+/, '').trim();
           break;
         }
       }
       if (fields.company) break;
     }
-    // If no company found via keywords, try the line after designation or email
+    // If no company found via keywords, try lines that look like company names
     if (!fields.company) {
       for (var i = 0; i < lines.length; i++) {
         var l = lines[i];
-        // Skip lines that are email, phone, website, or designation
         if (fields.email && l.indexOf('@') >= 0) continue;
         if (fields.phone && l.match(/\d{5,}/)) continue;
         if (fields.website && l === fields.website) continue;
         if (fields.designation && l === fields.designation) continue;
-        // Company is usually a short line with letters (not a person's name)
-        if (l.length >= 3 && l.length <= 50 && /^[A-Z]/.test(l) && !l.match(/^(Mr|Mrs|Ms|Dr)/i)) {
+        if (l.match(/^(T|E|W|Ph|Phone|Email|Web|Mob|Mobile)[:\s]/i)) continue;
+        if (l.length >= 3 && l.length <= 60 && /^[A-Z#]/.test(l) && !l.match(/^(Mr|Mrs|Ms|Dr)/i)) {
           fields.company = l;
           break;
         }
@@ -1551,28 +1666,30 @@ const CardScanner = {
     }
 
     // === NAME ===
-    // Name is usually: first non-company, non-contact line with 2-4 words, Title Case
+    // Name is usually: first non-company, non-contact line with 2-4 words, mostly letters
     for (var i = 0; i < lines.length; i++) {
       var l = lines[i];
-      // Skip if it's email, phone, website, designation, or company
       if (fields.email && l.indexOf('@') >= 0) continue;
       if (fields.phone && l.match(/\d{5,}/)) continue;
       if (fields.website && l === fields.website) continue;
       if (fields.designation && l === fields.designation) continue;
       if (fields.company && l === fields.company) continue;
-      // Skip lines with too many numbers or special chars
+      if (l.match(/^(T|E|W|Ph|Phone|Email|Web|Mob|Mobile)[:\s]/i)) continue;
       if (l.match(/\d{3,}/)) continue;
       if (l.match(/[@#:;]/)) continue;
+      if (l.match(/^[#\d]/)) continue; // Skip address lines starting with # or numbers
       // Name pattern: 2-4 words, mostly letters
       var words = l.split(/\s+/);
       if (words.length >= 2 && words.length <= 4) {
         var allAlpha = words.every(function(w) { return /^[A-Za-z.'-]+$/.test(w); });
         if (allAlpha) {
-          // Skip if it looks like a company (contains company keywords)
+          // Skip if it looks like a company or slogan
           var isCompany = false;
           for (var j = 0; j < companyKeywords.length; j++) {
             if (l.toUpperCase().indexOf(companyKeywords[j].toUpperCase()) >= 0) { isCompany = true; break; }
           }
+          // Also skip slogans (like "Idea | Profit | Future")
+          if (l.indexOf('|') >= 0 || l.indexOf(' - ') >= 0) isCompany = true;
           if (!isCompany) {
             fields.name = l;
             break;
@@ -1581,16 +1698,18 @@ const CardScanner = {
       }
     }
 
-    // === CITY ===
+    // === CITY === (word-boundary matching to avoid "Agrahara" matching "Agra")
     var indianCities = ['Bengaluru','Bangalore','Mumbai','Delhi','New Delhi','Chennai','Hyderabad','Kolkata',
       'Pune','Ahmedabad','Gurugram','Gurgaon','Noida','Kochi','Cochin','Coimbatore','Jaipur','Lucknow',
       'Surat','Kanpur','Nagpur','Indore','Thane','Bhopal','Visakhapatnam','Vizag','Patna','Vadodara',
       'Ghaziabad','Ludhiana','Agra','Nashik','Faridabad','Meerut','Rajkot','Varanasi','Srinagar',
-      'Aurangabad','Dhanbad','Amritsar','Navi Mumbai','Allahabad','Ranchi','Howrah','Jabalpur','Gwalior',
+      'Aurangabad','Dhanbad','Amritsar','Allahabad','Ranchi','Howrah','Jabalpur','Gwalior',
       'Vijayawada','Jodhpur','Raipur','Kota','Guwahati','Chandigarh','Mysuru','Mysore','Shimla','Bhubaneswar'];
     for (var i = 0; i < lines.length; i++) {
       for (var j = 0; j < indianCities.length; j++) {
-        if (lines[i].toLowerCase().indexOf(indianCities[j].toLowerCase()) >= 0) {
+        // Use word-boundary regex: \b ensures "Agra" doesn't match inside "Agrahara"
+        var cityRegex = new RegExp('\\b' + indianCities[j].replace(/\./g, '\\\\.') + '\\b', 'i');
+        if (cityRegex.test(lines[i])) {
           fields.city = indianCities[j];
           break;
         }
@@ -1599,13 +1718,13 @@ const CardScanner = {
     }
 
     // === COUNTRY ===
-    if (allText.match(/india/i)) {
+    if (allText.match(/\bindia\b/i)) {
       fields.country = 'India';
     } else {
       var countries = ['USA','United States','UK','United Kingdom','Singapore','Germany','China','Japan',
         'UAE','Dubai','Australia','Canada','France','Italy','South Korea','Taiwan','Hong Kong'];
       for (var i = 0; i < countries.length; i++) {
-        if (allText.match(new RegExp(countries[i], 'i'))) {
+        if (allText.match(new RegExp('\\b' + countries[i].replace(/\./g, '\\\\.') + '\\b', 'i'))) {
           fields.country = countries[i];
           break;
         }
