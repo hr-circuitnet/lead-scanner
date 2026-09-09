@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v24';
+const APP_VERSION = 'circuitnet-v25';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -1624,77 +1624,121 @@ const CardScanner = {
   },
 
   parseCardText(text) {
-    // Clean up common OCR artifacts
+    // Clean up — normalize line endings, remove OCR noise
     var cleaned = text
-      .replace(/~/g, '')        // Remove tildes (common OCR noise)
-      .replace(/\|/g, 'l')      // Pipes misread as 'l'
+      .replace(/\r\n/g, '\n')
       .replace(/\r/g, '\n')
-      .replace(/\n{3,}/g, '\n\n') // Collapse multiple blank lines
+      .replace(/~/g, '')
+      .replace(/\n{3,}/g, '\n\n')
       .trim();
 
-    var lines = cleaned.split(/\n/).map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 2; });
-    // Further filter: remove lines that are mostly special chars or very short noise
+    var lines = cleaned.split(/\n/).map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 1; });
+    // Remove noise lines (mostly special chars, single letters)
+    // BUT keep lines that look like labeled contact info (T:, E:, W:, Ph:, etc.) or contain phone numbers
     lines = lines.filter(function(l) {
-      // Remove lines that are just special characters or single letters
+      // Always keep lines that look like labeled contact info
+      if (/^(T|Tel|Phone|Ph|P|Mob|Mobile|M|E|Email|W|Web|Website|URL)\s*[:\-]/i.test(l)) return true;
+      // Always keep lines containing @ (email)
+      if (l.indexOf('@') >= 0) return true;
+      // Always keep lines containing phone numbers (10+ digits)
+      if (l.match(/\d{10,}/)) return true;
+      if (l.match(/\+\d{1,3}[-\s]?\d{5,}/)) return true;
+      // Always keep lines starting with www. or http
+      if (/^www\./i.test(l) || /^https?:\/\//i.test(l)) return true;
+      // For other lines, check letter ratio
       var letterCount = (l.match(/[a-zA-Z]/g) || []).length;
       if (letterCount < 2) return false;
-      // Remove lines that are mostly non-alphanumeric
-      var totalChars = l.length;
-      if (letterCount / totalChars < 0.4) return false;
+      if (letterCount / l.length < 0.4) return false;
       return true;
     });
-    var allText = lines.join(' ');
+
     var fields = {};
+    var usedLines = {}; // Track which lines we've assigned
 
-    // === EMAIL ===
-    // Try to fix truncated emails — look for @ with at least some domain chars
-    var emailMatch = allText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-    if (emailMatch) {
-      fields.email = emailMatch[0];
-    } else {
-      // Try to find partial email and reconstruct from website if available
-      var partialEmail = allText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]{3,}/);
-      if (partialEmail) {
-        fields.email = partialEmail[0];
+    // Helper: check if a line contains any of the given keywords (case-insensitive)
+    function hasKeyword(line, keywords) {
+      var lineUpper = line.toUpperCase();
+      for (var i = 0; i < keywords.length; i++) {
+        if (lineUpper.indexOf(keywords[i].toUpperCase()) >= 0) return true;
+      }
+      return false;
+    }
+
+    // Helper: mark a line as used
+    function markUsed(line) {
+      for (var i = 0; i < lines.length; i++) {
+        if (lines[i] === line) { usedLines[i] = true; break; }
       }
     }
 
-    // === PHONE ===
-    // Match +91 with various spacing: +91 96324 77442, +91-96324-77442, etc.
-    var phoneMatch = allText.match(/\+?91[-\s]?\d{5}[-\s]?\d{5}/);
-    if (phoneMatch) {
-      fields.phone = phoneMatch[0].trim();
-    } else {
-      // Indian mobile: 10 digits starting 6-9
-      phoneMatch = allText.match(/(?:^|\s)([6-9]\d{9})(?:\s|$)/);
-      if (phoneMatch) {
-        fields.phone = phoneMatch[1];
-      } else {
-        // International: +XX XXX XXXX+
-        phoneMatch = allText.match(/\+\d{1,3}[-\s]?\d{3,}[-\s]?\d{3,}/);
-        if (phoneMatch) fields.phone = phoneMatch[0].trim();
+    // Helper: check if line is already used
+    function isUsed(line) {
+      for (var i = 0; i < lines.length; i++) {
+        if (lines[i] === line) return !!usedLines[i];
       }
+      return false;
     }
 
-    // === WEBSITE ===
-    // Look for www. patterns first, then domain.com patterns
-    var websiteMatch = allText.match(/(?:https?:\/\/)?(?:www\.)?[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?(?:\/[a-zA-Z0-9._/-]*)?/);
-    if (websiteMatch) {
-      var url = websiteMatch[0];
-      // Exclude if it's part of an email
-      if (fields.email) {
-        var emailDomain = fields.email.split('@')[1];
-        if (emailDomain && url.indexOf(emailDomain) === 0) {
-          // URL is just the email domain — skip
-          url = null;
+    // === STEP 1: Extract labeled fields (T:, E:, W:, Ph:, Mob:, etc.) ===
+    // These are the most reliable — cards often have labeled contact info
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      var labelMatch = line.match(/^(T|Tel|Phone|Ph|P|Mob|Mobile|M|E|Email|W|Web|Website|URL)\s*[:\-]\s*(.+)/i);
+      if (labelMatch) {
+        var label = labelMatch[1].toLowerCase();
+        var value = labelMatch[2].trim();
+        if ((label === 't' || label === 'tel' || label === 'phone' || label === 'ph' || label === 'p' || label === 'mob' || label === 'mobile' || label === 'm') && !fields.phone) {
+          // Extract phone number from the value
+          var phoneClean = value.match(/\+?[\d\s-]{8,}/);
+          if (phoneClean) fields.phone = phoneClean[0].trim();
+          markUsed(line);
+        } else if ((label === 'e' || label === 'email') && !fields.email) {
+          // Extract email from the value
+          var emailClean = value.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+          if (emailClean) fields.email = emailClean[0];
+          markUsed(line);
+        } else if ((label === 'w' || label === 'web' || label === 'website' || label === 'url') && !fields.website) {
+          fields.website = value;
+          markUsed(line);
         }
       }
-      if (url && url.indexOf('.') > 0 && url.length > 4) {
-        fields.website = url;
+    }
+
+    // === STEP 2: Email (if not found via label) ===
+    if (!fields.email) {
+      for (var i = 0; i < lines.length; i++) {
+        var m = lines[i].match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+        if (m) { fields.email = m[0]; markUsed(lines[i]); break; }
       }
     }
 
-    // === DESIGNATION ===
+    // === STEP 3: Phone (if not found via label) ===
+    if (!fields.phone) {
+      var allText = lines.join(' ');
+      var phoneMatch = allText.match(/\+?91[-\s]?\d{5}[-\s]?\d{5}/);
+      if (phoneMatch) {
+        fields.phone = phoneMatch[0].trim();
+      } else {
+        phoneMatch = allText.match(/(?:^|\s)([6-9]\d{9})(?:\s|$)/);
+        if (phoneMatch) fields.phone = phoneMatch[1];
+      }
+    }
+
+    // === STEP 4: Website (if not found via label) ===
+    // Only accept lines that look like actual URLs: start with www. or http
+    if (!fields.website) {
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        // Must start with www. or http to be considered a website
+        if (/^www\./i.test(line) || /^https?:\/\//i.test(line)) {
+          fields.website = line;
+          markUsed(line);
+          break;
+        }
+      }
+    }
+
+    // === STEP 5: Designation ===
     var designationKeywords = [
       'Managing Director','General Manager','Vice President','Chief Executive','Chief Technology',
       'Chief Financial','Chief Operating','Manager','Director','CEO','CTO','CFO','COO','Founder',
@@ -1703,116 +1747,87 @@ const CardScanner = {
       'Programmer','Technician','Partner','Sr.','Senior','Junior'
     ];
     for (var i = 0; i < lines.length; i++) {
-      var lineLower = lines[i].toLowerCase();
-      // Skip lines that are clearly contact info
+      if (isUsed(lines[i])) continue;
       if (lines[i].indexOf('@') >= 0) continue;
       if (lines[i].match(/\+?\d{5,}/)) continue;
-      if (lines[i].match(/^(T|E|W|Ph|Phone|Email|Web|Mob|Mobile)[:\s]/i)) continue;
-      for (var j = 0; j < designationKeywords.length; j++) {
-        if (lineLower.indexOf(designationKeywords[j].toLowerCase()) >= 0 && lines[i].length < 60) {
-          // Clean up: remove leading symbols
-          fields.designation = lines[i].replace(/^[^a-zA-Z]+/, '').trim();
-          break;
-        }
+      if (hasKeyword(lines[i], designationKeywords) && lines[i].length < 60) {
+        fields.designation = lines[i].replace(/^[^a-zA-Z]+/, '').trim();
+        markUsed(lines[i]);
+        break;
       }
-      if (fields.designation) break;
     }
 
-    // === COMPANY ===
+    // === STEP 6: Company ===
+    // Collect ALL lines that match company keywords, then pick the LONGEST one
     var companyKeywords = ['Pvt Ltd','Private Limited','Pvt. Ltd.','Ltd','Limited','Inc','Corp','Corporation',
       'Technologies','Solutions','Systems','Enterprises','Industries','Group','Company','Co.',
       'LLP','LLC','GmbH','Sdn Bhd','Trading','Works','Labs','Tech','Electronics','Electricals'];
+    var companyCandidates = [];
     for (var i = 0; i < lines.length; i++) {
-      var lineUpper = lines[i].toUpperCase();
-      // Skip lines that are clearly contact info
+      if (isUsed(lines[i])) continue;
       if (lines[i].indexOf('@') >= 0) continue;
       if (lines[i].match(/\+?\d{5,}/)) continue;
-      if (lines[i].match(/^(T|E|W|Ph|Phone|Email|Web|Mob|Mobile)[:\s]/i)) continue;
-      if (fields.designation && lines[i] === fields.designation) continue;
-      for (var j = 0; j < companyKeywords.length; j++) {
-        if (lineUpper.indexOf(companyKeywords[j].toUpperCase()) >= 0 && lines[i].length < 80) {
-          fields.company = lines[i].replace(/^[^a-zA-Z#]+/, '').trim();
-          break;
-        }
+      if (hasKeyword(lines[i], companyKeywords) && lines[i].length < 80) {
+        companyCandidates.push(lines[i].replace(/^[^a-zA-Z#]+/, '').trim());
       }
-      if (fields.company) break;
     }
-    // If no company found via keywords, try lines that look like company names
-    if (!fields.company) {
-      for (var i = 0; i < lines.length; i++) {
-        var l = lines[i];
-        if (fields.email && l.indexOf('@') >= 0) continue;
-        if (fields.phone && l.match(/\d{5,}/)) continue;
-        if (fields.website && l === fields.website) continue;
-        if (fields.designation && l === fields.designation) continue;
-        if (l.match(/^(T|E|W|Ph|Phone|Email|Web|Mob|Mobile)[:\s]/i)) continue;
-        if (l.length >= 3 && l.length <= 60 && /^[A-Z#]/.test(l) && !l.match(/^(Mr|Mrs|Ms|Dr)/i)) {
-          fields.company = l;
-          break;
-        }
-      }
+    if (companyCandidates.length > 0) {
+      // Pick the longest candidate (most complete company name)
+      companyCandidates.sort(function(a, b) { return b.length - a.length; });
+      fields.company = companyCandidates[0];
+      markUsed(companyCandidates[0]);
     }
 
-    // === NAME ===
-    // Name is usually: first non-company, non-contact line with 2-4 words, mostly letters
+    // === STEP 7: Name ===
+    // First non-used line with 2-4 words, mostly letters, not a slogan
     for (var i = 0; i < lines.length; i++) {
+      if (isUsed(lines[i])) continue;
       var l = lines[i];
-      if (fields.email && l.indexOf('@') >= 0) continue;
-      if (fields.phone && l.match(/\d{5,}/)) continue;
-      if (fields.website && l === fields.website) continue;
-      if (fields.designation && l === fields.designation) continue;
-      if (fields.company && l === fields.company) continue;
-      if (l.match(/^(T|E|W|Ph|Phone|Email|Web|Mob|Mobile)[:\s]/i)) continue;
+      if (l.indexOf('@') >= 0) continue;
       if (l.match(/\d{3,}/)) continue;
       if (l.match(/[@#:;]/)) continue;
-      if (l.match(/^[#\d]/)) continue; // Skip address lines starting with # or numbers
+      if (l.match(/^[#\d]/)) continue;
+      // Skip slogans
+      if (l.indexOf('|') >= 0 || l.indexOf(' - ') >= 0) continue;
       // Name pattern: 2-4 words, mostly letters
       var words = l.split(/\s+/);
       if (words.length >= 2 && words.length <= 4) {
         var allAlpha = words.every(function(w) { return /^[A-Za-z.'-]+$/.test(w); });
         if (allAlpha) {
-          // Skip if it looks like a company or slogan
-          var isCompany = false;
-          for (var j = 0; j < companyKeywords.length; j++) {
-            if (l.toUpperCase().indexOf(companyKeywords[j].toUpperCase()) >= 0) { isCompany = true; break; }
-          }
-          // Also skip slogans (like "Idea | Profit | Future")
-          if (l.indexOf('|') >= 0 || l.indexOf(' - ') >= 0) isCompany = true;
-          if (!isCompany) {
+          // Skip if it looks like a company
+          if (!hasKeyword(l, companyKeywords)) {
             fields.name = l;
+            markUsed(l);
             break;
           }
         }
       }
     }
 
-    // === CITY === (word-boundary matching to avoid "Agrahara" matching "Agra")
+    // === STEP 8: City (word-boundary matching) ===
     var indianCities = ['Bengaluru','Bangalore','Mumbai','Delhi','New Delhi','Chennai','Hyderabad','Kolkata',
       'Pune','Ahmedabad','Gurugram','Gurgaon','Noida','Kochi','Cochin','Coimbatore','Jaipur','Lucknow',
       'Surat','Kanpur','Nagpur','Indore','Thane','Bhopal','Visakhapatnam','Vizag','Patna','Vadodara',
       'Ghaziabad','Ludhiana','Agra','Nashik','Faridabad','Meerut','Rajkot','Varanasi','Srinagar',
       'Aurangabad','Dhanbad','Amritsar','Allahabad','Ranchi','Howrah','Jabalpur','Gwalior',
       'Vijayawada','Jodhpur','Raipur','Kota','Guwahati','Chandigarh','Mysuru','Mysore','Shimla','Bhubaneswar'];
-    for (var i = 0; i < lines.length; i++) {
-      for (var j = 0; j < indianCities.length; j++) {
-        // Use word-boundary regex: \b ensures "Agra" doesn't match inside "Agrahara"
-        var cityRegex = new RegExp('\\b' + indianCities[j].replace(/\./g, '\\\\.') + '\\b', 'i');
-        if (cityRegex.test(lines[i])) {
-          fields.city = indianCities[j];
-          break;
-        }
+    var allTextForCity = lines.join(' ');
+    for (var j = 0; j < indianCities.length; j++) {
+      var cityRegex = new RegExp('\\b' + indianCities[j].replace(/\./g, '\\.') + '\\b', 'i');
+      if (cityRegex.test(allTextForCity)) {
+        fields.city = indianCities[j];
+        break;
       }
-      if (fields.city) break;
     }
 
-    // === COUNTRY ===
-    if (allText.match(/\bindia\b/i)) {
+    // === STEP 9: Country ===
+    if (/\bindia\b/i.test(allTextForCity)) {
       fields.country = 'India';
     } else {
       var countries = ['USA','United States','UK','United Kingdom','Singapore','Germany','China','Japan',
         'UAE','Dubai','Australia','Canada','France','Italy','South Korea','Taiwan','Hong Kong'];
       for (var i = 0; i < countries.length; i++) {
-        if (allText.match(new RegExp('\\b' + countries[i].replace(/\./g, '\\\\.') + '\\b', 'i'))) {
+        if (new RegExp('\\b' + countries[i].replace(/\./g, '\\.') + '\\b', 'i').test(allTextForCity)) {
           fields.country = countries[i];
           break;
         }
