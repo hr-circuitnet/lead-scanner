@@ -1,4 +1,4 @@
-const CACHE_NAME = 'circuitnet-v22';
+const CACHE_NAME = 'circuitnet-v24';
 const ASSETS = [
   './',
   './index.html',
@@ -38,6 +38,7 @@ self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
   // Don't intercept Supabase API calls — they must always hit the network
   if (e.request.url.includes('supabase.co')) return;
+  if (e.request.url.includes('ocr.space')) return;
   e.respondWith(
     caches.match(e.request).then(cached => {
       if (cached) return cached;

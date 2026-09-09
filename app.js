@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v22';
+const APP_VERSION = 'circuitnet-v24';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -511,6 +511,8 @@ const App = {
       venue: 'BIEC Bengaluru, Hall 3, Stall D15',
       leadSource: 'Electronica 2026'
     };
+    // Ensure OCR key is set (default if not already in settings)
+    if (!App.settings.ocrApiKey) App.settings.ocrApiKey = 'K88604395188957';
     // Load current event from localStorage (persists across sessions)
     var savedEvent = localStorage.getItem('cn_current_event');
     if (savedEvent) {
@@ -1423,58 +1425,94 @@ const CardScanner = {
 
     var statusEl = document.getElementById('cardScanStatus');
     var progEl = document.getElementById('cardScanProgress');
+    var self = this;
 
     try {
-      // Load Tesseract.js dynamically
-      if (typeof Tesseract === 'undefined') {
-        statusEl.textContent = 'Loading OCR engine...';
-        await this.loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js');
+      // Get API key from settings
+      var apiKey = (App.settings && App.settings.ocrApiKey) ? App.settings.ocrApiKey : '';
+
+      var rawText = '';
+      var usedApi = false;
+
+      // Try OCR.space API first (if key is available)
+      if (apiKey) {
+        try {
+          statusEl.textContent = 'Uploading to OCR.space...';
+          progEl.style.width = '30%';
+
+          // Compress image to under 1MB for OCR.space free tier
+          var compressedBlob = await this.compressImage(file);
+          console.log('Card scan: compressed image size:', Math.round(compressedBlob.size / 1024), 'KB');
+
+          statusEl.textContent = 'Recognizing text via OCR.space...';
+          progEl.style.width = '60%';
+
+          var formData = new FormData();
+          formData.append('apikey', apiKey);
+          formData.append('file', compressedBlob, 'card.jpg');
+          formData.append('language', 'eng');
+          formData.append('isOverlayRequired', 'false');
+          formData.append('scale', 'true');
+          formData.append('OCREngine', '2');
+
+          var response = await fetch('https://api.ocr.space/parse/image', {
+            method: 'POST',
+            body: formData
+          });
+
+          var data = await response.json();
+          console.log('OCR.space response:', data);
+
+          if (data && !data.IsErroredOnProcessing && data.ParsedResults && data.ParsedResults.length > 0) {
+            rawText = (data.ParsedResults[0].ParsedText || '').trim();
+            usedApi = true;
+            progEl.style.width = '100%';
+            console.log('OCR.space raw text:', rawText);
+          } else {
+            console.warn('OCR.space error:', data ? data.ErrorMessage : 'no response');
+          }
+        } catch (apiErr) {
+          console.warn('OCR.space failed, falling back to Tesseract:', apiErr.message);
+        }
       }
 
-      // Preprocess the image for better OCR accuracy
-      statusEl.textContent = 'Processing image...';
-      var processedCanvas = await this.preprocessImage(file);
-      console.log('Card scan: image preprocessed, canvas size:', processedCanvas.width, 'x', processedCanvas.height);
-
-      // Use Worker API with explicit parameters for better accuracy
-      statusEl.textContent = 'Initializing OCR engine...';
-      var worker = await Tesseract.createWorker('eng', 1, {
-        logger: function(m) {
-          if (m.status === 'recognizing text') {
-            var pct = Math.round(m.progress * 100);
-            progEl.style.width = pct + '%';
-            statusEl.textContent = 'Recognizing text... ' + pct + '%';
-          } else if (m.status) {
-            statusEl.textContent = m.status + '...';
-          }
+      // If OCR.space didn't work, fall back to Tesseract (offline)
+      if (!rawText) {
+        statusEl.textContent = 'Using offline OCR engine...';
+        if (typeof Tesseract === 'undefined') {
+          await this.loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js');
         }
-      });
 
-      // Set parameters for business card OCR
-      // PSM 11 = sparse text (best for business cards with scattered text)
-      // PSM 6 = uniform block of text (fallback)
-      var psm = (Tesseract.PSM && Tesseract.PSM.SPARSE_TEXT) ? Tesseract.PSM.SPARSE_TEXT : '11';
-      await worker.setParameters({
-        tessedit_pageseg_mode: psm
-      });
-
-      statusEl.textContent = 'Recognizing text...';
-      var result = await worker.recognize(processedCanvas);
-      await worker.terminate();
-
-      var rawText = (result.data.text || '').trim();
-      console.log('Card OCR raw result:', rawText);
-      console.log('Card OCR lines:', rawText.split('\n').map(function(l){return l.trim();}).filter(function(l){return l.length>1;}));
+        var processedCanvas = await this.preprocessImage(file);
+        var worker = await Tesseract.createWorker('eng', 1, {
+          logger: function(m) {
+            if (m.status === 'recognizing text') {
+              var pct = Math.round(m.progress * 100);
+              progEl.style.width = pct + '%';
+              statusEl.textContent = 'Recognizing text... ' + pct + '%';
+            } else if (m.status) {
+              statusEl.textContent = m.status + '...';
+            }
+          }
+        });
+        var psm = (Tesseract.PSM && Tesseract.PSM.SINGLE_BLOCK) ? Tesseract.PSM.SINGLE_BLOCK : '6';
+        await worker.setParameters({ tessedit_pageseg_mode: psm });
+        var result = await worker.recognize(processedCanvas);
+        await worker.terminate();
+        rawText = (result.data.text || '').trim();
+        console.log('Tesseract raw text:', rawText);
+      }
 
       // Parse the extracted text
-      var fields = this.parseCardText(rawText);
+      var fields = self.parseCardText(rawText);
       fields.rawBadgeData = rawText;
+      fields.ocrSource = usedApi ? 'OCR.space' : 'Tesseract (offline)';
 
       // Remove overlay
       overlay.remove();
 
       // Show what was extracted and let user confirm/edit
-      this.showExtractedData(fields, rawText);
+      self.showExtractedData(fields, rawText);
 
     } catch (e) {
       console.error('Card scan error:', e);
@@ -1486,18 +1524,52 @@ const CardScanner = {
   },
 
   /**
-   * Preprocess image for better OCR:
-   * 1. Load into canvas
-   * 2. Scale up if small (visiting card photos from phone are often low-res)
-   * 3. Convert to grayscale
-   * 4. Apply Otsu's binarization (pure black/white for clean text)
-   * Returns a canvas element ready for Tesseract
+   * Compress image to under 1MB for OCR.space free tier limit
+   * Resizes and converts to JPEG with quality adjustment
+   */
+  compressImage(file) {
+    return new Promise(function(resolve, reject) {
+      var img = new Image();
+      img.onload = function() {
+        var maxDim = 2000; // Max width/height
+        var quality = 0.9;
+        var w = img.width;
+        var h = img.height;
+        if (w > maxDim || h > maxDim) {
+          var ratio = Math.min(maxDim / w, maxDim / h);
+          w = Math.round(w * ratio);
+          h = Math.round(h * ratio);
+        }
+        var canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        var ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, w, h);
+        canvas.toBlob(function(blob) {
+          if (blob.size > 900000) {
+            // Still too big, reduce quality
+            canvas.toBlob(function(blob2) {
+              resolve(blob2);
+            }, 'image/jpeg', 0.6);
+          } else {
+            resolve(blob);
+          }
+        }, 'image/jpeg', quality);
+      };
+      img.onerror = function() { reject(new Error('Failed to load image')); };
+      img.src = URL.createObjectURL(file);
+    });
+  },
+
+  /**
+   * Preprocess image for Tesseract fallback (offline mode)
    */
   preprocessImage(file) {
     return new Promise(function(resolve, reject) {
       var img = new Image();
       img.onload = function() {
-        // Scale up — target at least 2000px wide for better OCR
         var targetWidth = 2000;
         var scale = 1;
         if (img.width < targetWidth) {
@@ -1505,64 +1577,24 @@ const CardScanner = {
         }
         var w = Math.round(img.width * scale);
         var h = Math.round(img.height * scale);
-
         var canvas = document.createElement('canvas');
         canvas.width = w;
         canvas.height = h;
         var ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(img, 0, 0, w, h);
-
-        // Get pixel data
         var imageData = ctx.getImageData(0, 0, w, h);
         var data = imageData.data;
-        var totalPixels = data.length / 4;
-
-        // Step 1: Convert to grayscale
-        var grayValues = [];
+        var contrastFactor = 1.2;
         for (var i = 0; i < data.length; i += 4) {
           var gray = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
-          grayValues.push(gray);
+          gray = (gray - 128) * contrastFactor + 128;
+          gray = Math.max(0, Math.min(255, gray));
+          data[i] = gray;
+          data[i+1] = gray;
+          data[i+2] = gray;
         }
-
-        // Step 2: Calculate Otsu's threshold
-        // Build histogram (256 bins)
-        var histogram = new Array(256).fill(0);
-        for (var i = 0; i < grayValues.length; i++) {
-          histogram[Math.round(grayValues[i])]++;
-        }
-
-        // Otsu's method: find the threshold that maximizes between-class variance
-        var sum = 0;
-        for (var t = 0; t < 256; t++) sum += t * histogram[t];
-        var sumB = 0;
-        var wB = 0;
-        var maxVariance = 0;
-        var threshold = 128;
-        for (var t = 0; t < 256; t++) {
-          wB += histogram[t];
-          if (wB === 0) continue;
-          var wF = totalPixels - wB;
-          if (wF === 0) break;
-          sumB += t * histogram[t];
-          var mB = sumB / wB;
-          var mF = (sum - sumB) / wF;
-          var variance = wB * wF * (mB - mF) * (mB - mF);
-          if (variance > maxVariance) {
-            maxVariance = variance;
-            threshold = t;
-          }
-        }
-        console.log('Card scan: Otsu threshold =', threshold);
-
-        // Step 3: Apply binarization (pure black and white)
-        for (var i = 0; i < grayValues.length; i++) {
-          var val = grayValues[i] > threshold ? 255 : 0;
-          var idx = i * 4;
-          data[idx] = val;
-          data[idx+1] = val;
-          data[idx+2] = val;
-        }
-
         ctx.putImageData(imageData, 0, 0);
         resolve(canvas);
       };
@@ -1600,7 +1632,17 @@ const CardScanner = {
       .replace(/\n{3,}/g, '\n\n') // Collapse multiple blank lines
       .trim();
 
-    var lines = cleaned.split(/\n/).map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 1; });
+    var lines = cleaned.split(/\n/).map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 2; });
+    // Further filter: remove lines that are mostly special chars or very short noise
+    lines = lines.filter(function(l) {
+      // Remove lines that are just special characters or single letters
+      var letterCount = (l.match(/[a-zA-Z]/g) || []).length;
+      if (letterCount < 2) return false;
+      // Remove lines that are mostly non-alphanumeric
+      var totalChars = l.length;
+      if (letterCount / totalChars < 0.4) return false;
+      return true;
+    });
     var allText = lines.join(' ');
     var fields = {};
 
@@ -2960,18 +3002,22 @@ const Admin = {
   },
 
   renderSettings() {
-    document.getElementById('setCompanyName').value = App.settings.companyName;
-    document.getElementById('setEventName').value = App.settings.eventName;
-    document.getElementById('setVenue').value = App.settings.venue;
-    document.getElementById('setLeadSource').value = App.settings.leadSource;
+    document.getElementById('setCompanyName').value = App.settings.companyName || '';
+    document.getElementById('setEventName').value = App.settings.eventName || '';
+    document.getElementById('setVenue').value = App.settings.venue || '';
+    document.getElementById('setLeadSource').value = App.settings.leadSource || '';
+    var ocrEl = document.getElementById('setOcrKey');
+    if (ocrEl) ocrEl.value = App.settings.ocrApiKey || '';
   },
 
   async saveSettings() {
+    var ocrEl = document.getElementById('setOcrKey');
     App.settings = {
       companyName: document.getElementById('setCompanyName').value,
       eventName: document.getElementById('setEventName').value,
       venue: document.getElementById('setVenue').value,
-      leadSource: document.getElementById('setLeadSource').value
+      leadSource: document.getElementById('setLeadSource').value,
+      ocrApiKey: ocrEl ? ocrEl.value.trim() : (App.settings.ocrApiKey || '')
     };
     await dbPut('settings', { key: 'app', value: App.settings });
     App.toast('Settings saved', 'success');

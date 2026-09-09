@@ -542,6 +542,12 @@ a{text-decoration:none;color:inherit}
       <button class="btn btn-primary" style="width:100%" onclick="Admin.saveSettings()">Save Settings</button>
     </div>
     <div class="form-card">
+      <h3>🪪 Visiting Card Scanner</h3>
+      <div class="form-group"><label>OCR.space API Key</label><input type="text" id="setOcrKey" placeholder="Enter OCR.space API key" style="font-size:13px"></div>
+      <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">Get a free key at ocr.space/ocrapi — 25,000 scans/month free. If key is set, card scanner uses OCR.space (accurate, needs internet). If empty, falls back to offline Tesseract (less accurate).</p>
+      <button class="btn btn-primary" style="width:100%" onclick="Admin.saveSettings()">Save OCR Key</button>
+    </div>
+    <div class="form-card">
       <h3>Data Management</h3>
       <input type="file" id="importSettingsFile" accept=".json" style="display:none" onchange="Admin.importTeamConfig(this.files[0]); this.value='';">
       <button class="btn btn-primary" style="width:100%;margin-bottom:10px" onclick="document.getElementById('importSettingsFile').click()">📥 Import Team Config (users + categories)</button>
