@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v34';
+const APP_VERSION = 'circuitnet-v35';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -241,50 +241,65 @@ const Cloud = {
     var payload = toLowerKeys(row);
     // Strip empty/null values to reduce chance of schema mismatch
     for (var k in payload) {
-      if (payload[k] === null || payload[k] === undefined) delete payload[k];
+      if (payload[k] === null || payload[k] === undefined || payload[k] === '') delete payload[k];
     }
-    var resp = await fetch(SB_REST + '/' + table + '?on_conflict=' + col, {
-      method: 'POST',
-      headers: sbHeaders({ 'Prefer': 'resolution=merge-duplicates' }),
-      body: JSON.stringify(payload)
-    });
-    if (!resp.ok) {
-      var body = await resp.text();
-      // If 400 with column-not-found, strip the missing column and retry once
-      if (resp.status === 400 && body.indexOf('Could not find the') >= 0) {
-        var m = body.match(/'([a-z]+)' column/);
-        if (m) {
-          this.log('⚠️ Column ' + m[1] + ' not in Supabase schema — retrying without it');
-          delete payload[m[1]];
-          // Also strip from CAMEL_COLS mapping so future calls skip it
-          resp = await fetch(SB_REST + '/' + table + '?on_conflict=' + col, {
-            method: 'POST',
-            headers: sbHeaders({ 'Prefer': 'resolution=merge-duplicates' }),
-            body: JSON.stringify(payload)
-          });
-          if (resp.ok) return true;
-          body = await resp.text();
-        }
+    // Pre-strip known potentially-missing columns to reduce 400 errors
+    // These columns may not exist in older Supabase schemas
+    var optionalCols = ['capturedate', 'rawocrdata', 'phone2', 'phone3', 'phone4', 'phone5',
+      'address', 'state', 'pincode', 'department', 'email2', 'linkedin', 'capturedate'];
+    // Try full payload first
+    var maxRetries = 10;
+    for (var attempt = 0; attempt <= maxRetries; attempt++) {
+      var resp = await fetch(SB_REST + '/' + table + '?on_conflict=' + col, {
+        method: 'POST',
+        headers: sbHeaders({ 'Prefer': 'resolution=merge-duplicates' }),
+        body: JSON.stringify(payload)
+      });
+      if (resp.ok) {
+        if (attempt > 0) this.log('✅ Upsert succeeded after stripping ' + attempt + ' missing column(s)');
+        return true;
       }
-      throw new Error('upsert ' + table + ': ' + resp.status + ' ' + body);
+      var body = await resp.text();
+      if (resp.status !== 400 || body.indexOf('Could not find the') < 0) {
+        throw new Error('upsert ' + table + ': ' + resp.status + ' ' + body);
+      }
+      // Extract missing column name and strip it
+      var m = body.match(/'([a-z]+)' column/);
+      if (!m) throw new Error('upsert ' + table + ': ' + resp.status + ' ' + body);
+      this.log('⚠️ Column ' + m[1] + ' not in Supabase schema — retrying without it');
+      delete payload[m[1]];
     }
-    return true;
+    throw new Error('upsert ' + table + ': failed after ' + maxRetries + ' retries');
   },
 
   async upsertBatch(table, rows, conflictCol) {
     if (!rows || rows.length === 0) return;
     var col = conflictCol || 'id';
-    var lowerRows = rows.map(function(r){ return toLowerKeys(r); });
-    var resp = await fetch(SB_REST + '/' + table + '?on_conflict=' + col, {
-      method: 'POST',
-      headers: sbHeaders({ 'Prefer': 'resolution=merge-duplicates' }),
-      body: JSON.stringify(lowerRows)
+    // Strip empty values from all rows
+    var lowerRows = rows.map(function(r){
+      var lr = toLowerKeys(r);
+      for (var k in lr) { if (lr[k] === null || lr[k] === undefined || lr[k] === '') delete lr[k]; }
+      return lr;
     });
-    if (!resp.ok) {
+    // Retry loop for missing columns
+    var maxRetries = 10;
+    for (var attempt = 0; attempt <= maxRetries; attempt++) {
+      var resp = await fetch(SB_REST + '/' + table + '?on_conflict=' + col, {
+        method: 'POST',
+        headers: sbHeaders({ 'Prefer': 'resolution=merge-duplicates' }),
+        body: JSON.stringify(lowerRows)
+      });
+      if (resp.ok) return true;
       var body = await resp.text();
-      throw new Error('upsertBatch ' + table + ': ' + resp.status + ' ' + body);
+      if (resp.status !== 400 || body.indexOf('Could not find the') < 0) {
+        throw new Error('upsertBatch ' + table + ': ' + resp.status + ' ' + body);
+      }
+      var m = body.match(/'([a-z]+)' column/);
+      if (!m) throw new Error('upsertBatch ' + table + ': ' + resp.status + ' ' + body);
+      this.log('⚠️ Batch: Column ' + m[1] + ' not in schema — retrying without it');
+      lowerRows.forEach(function(r){ delete r[m[1]]; });
     }
-    return true;
+    throw new Error('upsertBatch ' + table + ': failed after retries');
   },
 
   async update(table, id, patch) {
@@ -413,6 +428,8 @@ const Cloud = {
         }
       }
       this.log('syncDown: ' + cloudCats.length + ' categories from cloud, ' + added + ' new added');
+      // Clean up any duplicates after sync
+      await App.dedupCategories();
     } catch (e) { this.log('❌ syncDown cats: ' + e.message); }
 
     // === EVENTS ===
@@ -579,8 +596,13 @@ const App = {
     }
     for (var i = 0; i < dupes.length; i++) {
       await dbDelete('categories', dupes[i]);
+      // Also delete from cloud
+      try { await Cloud.deleteRow('categories', dupes[i]); } catch(e) {}
     }
-    if (dupes.length > 0) console.log('Cleaned up ' + dupes.length + ' duplicate categories');
+    if (dupes.length > 0) {
+      console.log('Cleaned up ' + dupes.length + ' duplicate categories');
+      Cloud.log('🧹 Cleaned up ' + dupes.length + ' duplicate categories');
+    }
   },
 
   async loadSettings() {
@@ -2493,7 +2515,6 @@ const CardScanner = {
   },
 
   showExtractedData(fields, rawText) {
-    // Store raw OCR text and capture date for the form
     var now = new Date();
     var captureDate = now.toISOString().slice(0,10) + ' ' + now.toTimeString().slice(0,8);
     this.lastRawOCR = rawText;
@@ -2501,17 +2522,60 @@ const CardScanner = {
     this.pendingRawText = rawText;
     this.pendingCaptureDate = captureDate;
 
-    // Ask if user wants to scan the back side of the card
-    if (confirm('Front side scanned! Do you want to scan the BACK SIDE of the card?\n\nTap OK to scan back side, or Cancel to finish with current data.')) {
-      // User wants to scan back side
-      this.isBackSide = true;
-      // Trigger file input again
+    // Show capture screen with 3 options
+    var existing = document.getElementById('cardCaptureScreen');
+    if (existing) existing.remove();
+
+    // Build summary of extracted data
+    var summary = [];
+    if (fields.name) summary.push('Name: ' + fields.name);
+    if (fields.company) summary.push('Company: ' + fields.company);
+    if (fields.designation) summary.push('Designation: ' + fields.designation);
+    if (fields.phone) summary.push('Phone: ' + fields.phone);
+    if (fields.email) summary.push('Email: ' + fields.email);
+    if (fields.city) summary.push('City: ' + fields.city);
+    var summaryHtml = summary.length > 0 ?
+      '<div style="font-size:13px;color:#aaa;margin:12px 0;max-height:150px;overflow-y:auto">' +
+      summary.map(function(s){ return '<div style="margin-bottom:4px">✓ ' + s + '</div>'; }).join('') +
+      '</div>' : '<div style="font-size:13px;color:#f99;margin:12px 0">No fields detected — you can retake or enter manually</div>';
+
+    var isBackSide = !!this.pendingRawText && this.isBackSide;
+    var sideLabel = isBackSide ? 'Back side scanned' : 'Front side scanned';
+
+    var overlay = document.createElement('div');
+    overlay.id = 'cardCaptureScreen';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;padding:24px';
+    overlay.innerHTML =
+      '<div style="font-size:40px;margin-bottom:8px">🪪</div>' +
+      '<div style="font-size:18px;font-weight:600;margin-bottom:4px">' + sideLabel + '</div>' +
+      '<div style="font-size:13px;color:#888;margin-bottom:8px">OCR complete · ' + (fields.ocrSource || 'OCR') + '</div>' +
+      summaryHtml +
+      '<div style="display:flex;flex-direction:column;gap:10px;width:100%;max-width:300px">' +
+        '<button id="ccBtnRetake" style="padding:14px;border:2px solid #555;background:transparent;color:#fff;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">🔄 Retake Photo</button>' +
+        '<button id="ccBtnOtherSide" style="padding:14px;border:2px solid #0d6efd;background:transparent;color:#0d6efd;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">📷 Capture Other Side</button>' +
+        '<button id="ccBtnUse" style="padding:14px;border:none;background:#0d6efd;color:#fff;border-radius:10px;font-size:16px;font-weight:700;cursor:pointer">✅ Use Photo</button>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    var self = this;
+    document.getElementById('ccBtnRetake').onclick = function() {
+      overlay.remove();
+      self.pendingFields = null;
+      self.pendingRawText = null;
+      self.isBackSide = false;
       var input = document.getElementById('cardScanInput');
       if (input) input.click();
-    } else {
-      // User is done — go to form
-      this.finalizeCardScan(fields, rawText, captureDate);
-    }
+    };
+    document.getElementById('ccBtnOtherSide').onclick = function() {
+      overlay.remove();
+      self.isBackSide = true;
+      var input = document.getElementById('cardScanInput');
+      if (input) input.click();
+    };
+    document.getElementById('ccBtnUse').onclick = function() {
+      overlay.remove();
+      self.finalizeCardScan(fields, rawText, captureDate);
+    };
   },
 
   finalizeCardScan(fields, rawText, captureDate) {
