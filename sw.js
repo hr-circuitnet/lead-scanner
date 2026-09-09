@@ -1,4 +1,4 @@
-const CACHE_NAME = 'circuitnet-v28';
+const CACHE_NAME = 'circuitnet-v29';
 const ASSETS = [
   './',
   './index.html',

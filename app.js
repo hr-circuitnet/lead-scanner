@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v28';
+const APP_VERSION = 'circuitnet-v29';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -104,6 +104,7 @@ const SB_REST    = SUPABASE_URL + '/rest/v1';
 var CAMEL_COLS = {
   'badgeid':'badgeId','eventid':'eventId','eventname':'eventName',
   'rawbadgedata':'rawBadgeData','rawocrdata':'rawOcrData','capturedate':'captureDate',
+  'phone2':'phone2','phone3':'phone3','phone4':'phone4','phone5':'phone5',
   'visitortype':'visitorType',
   'leadsource':'leadSource','customerrequirement':'customerRequirement',
   'followup':'followUp','followupdate':'followUpDate',
@@ -1678,34 +1679,59 @@ const CardScanner = {
       if (m) { fields.email = m[0]; markUsed(i); break; }
     }
 
-    // === PHONE RULE: Prefer Mob/Mobile labels, then any labeled phone, then raw +91 or 10-digit ===
-    // First pass: look for Mob/Mobile labels (most likely personal mobile)
+    // === PHONE RULE: Extract ALL phone numbers found on the card ===
+    // First pass: collect all labeled phones (Mob/Mobile/Tel/Phone/Ph)
+    var allPhones = [];
+    var seenPhoneDigits = {};
+    function addPhone(num) {
+      var digits = num.replace(/\D/g, '');
+      if (digits.length < 8) return; // skip too-short
+      if (seenPhoneDigits[digits]) return; // dedup
+      seenPhoneDigits[digits] = true;
+      allPhones.push(num.trim());
+    }
     for (var i = 0; i < lines.length; i++) {
       if (isUsedIdx(i)) continue;
+      // Match Mob/Mobile labels
       var lm = lines[i].match(/^(Mob|Mobile)\s*[:\-]?\s*(.+)/i);
       if (lm && lm[2]) {
         var pc = lm[2].match(/\+?[\d\s-]{8,}/);
-        if (pc) { fields.phone = pc[0].trim(); markUsed(i); break; }
+        if (pc) { addPhone(pc[0]); markUsed(i); continue; }
+      }
+      // Match Tel/Telephone/Phone/Ph/T labels
+      lm = lines[i].match(/^(Telephone|Tel|Phone|Ph|T)\s*[:\-]\s*(.+)/i);
+      if (lm && lm[2]) {
+        var pc = lm[2].match(/\+?[\d\s-]{8,}/);
+        if (pc) { addPhone(pc[0]); markUsed(i); continue; }
       }
     }
-    // Second pass: any labeled phone (T:, Tel:, Telephone:, Ph:, P:)
-    if (!fields.phone) {
-      for (var i = 0; i < lines.length; i++) {
-        if (isUsedIdx(i)) continue;
-        var lm = lines[i].match(/^(Telephone|Tel|Phone|Ph|P|T)\s*[:\-]\s*(.+)/i);
-        if (lm && lm[2]) {
-          var pc = lm[2].match(/\+?[\d\s-]{8,}/);
-          if (pc) { fields.phone = pc[0].trim(); markUsed(i); break; }
-        }
-      }
+    // Second pass: find raw phone numbers in unused lines (+91... or 10-digit)
+    for (var i = 0; i < lines.length; i++) {
+      if (isUsedIdx(i)) continue;
+      // +91 with flexible grouping
+      var matches = lines[i].match(/\+91[\s-]?\d{2,4}[\s-]?\d{3,5}[\s-]?\d{2,5}/g);
+      if (matches) { matches.forEach(addPhone); continue; }
+      // 10-digit Indian mobile
+      matches = lines[i].match(/(?:^|\s)([6-9]\d{9})(?:\s|$)/g);
+      if (matches) { matches.forEach(function(m){ addPhone(m.trim()); }); }
     }
-    // Third pass: raw phone number anywhere in text
-    if (!fields.phone) {
+    // Third pass: scan full text for any remaining phones
+    if (allPhones.length === 0) {
       var allText = lines.join(' ');
       var pm = allText.match(/\+91[\s-]?\d{2,4}[\s-]?\d{3,5}[\s-]?\d{2,5}/);
-      if (pm) fields.phone = pm[0].trim();
-      if (!fields.phone) { pm = allText.match(/\+?91[\s-]?\d{5}[\s-]?\d{5}/); if (pm) fields.phone = pm[0].trim(); }
-      if (!fields.phone) { pm = allText.match(/(?:^|\s)([6-9]\d{9})(?:\s|$)/); if (pm) fields.phone = pm[1]; }
+      if (pm) addPhone(pm[0]);
+      pm = allText.match(/\+?91[\s-]?\d{5}[\s-]?\d{5}/);
+      if (pm) addPhone(pm[0]);
+      pm = allText.match(/(?:^|\s)([6-9]\d{9})(?:\s|$)/);
+      if (pm) addPhone(pm[1]);
+    }
+    // Assign to fields: phone, phone2, phone3, phone4, phone5
+    if (allPhones.length > 0) {
+      fields.phone = allPhones[0];
+      if (allPhones[1]) fields.phone2 = allPhones[1];
+      if (allPhones[2]) fields.phone3 = allPhones[2];
+      if (allPhones[3]) fields.phone4 = allPhones[3];
+      if (allPhones[4]) fields.phone5 = allPhones[4];
     }
 
     // === WEBSITE RULE: Line starting with www. or http, take first URL if pipe-separated ===
@@ -1852,6 +1878,7 @@ const CardScanner = {
 /* ========================= MANUAL FORM ========================= */
 const ManualForm = {
   currentScanData: null,
+  phoneFieldCount: 1,
 
   async render() {
     const cats = await dbGetAll('categories');
@@ -1879,9 +1906,17 @@ const ManualForm = {
           <div class="form-group"><label>Designation</label><input type="text" id="f_designation" value="${esc(data.designation||'')}" placeholder="Job title"></div>
         </div>
         <div class="field-row">
-          <div class="form-group"><label>Mobile / Phone</label><input type="tel" id="f_phone" value="${esc(data.phone||'')}" placeholder="+91..."></div>
-          <div class="form-group"><label>Email</label><input type="email" id="f_email" value="${esc(data.email||'')}" placeholder="email@example.com"></div>
+          <div class="form-group">
+            <label>Mobile / Phone</label>
+            <input type="tel" id="f_phone" value="${esc(data.phone||'')}" placeholder="+91...">
+          </div>
+          <div class="form-group">
+            <label>Email</label>
+            <input type="email" id="f_email" value="${esc(data.email||'')}" placeholder="email@example.com">
+          </div>
         </div>
+        <div id="extraPhonesContainer"></div>
+        <button type="button" class="add-phone-btn" onclick="ManualForm.addPhoneField()">+ Add Phone</button>
         <div class="field-row">
           <div class="form-group"><label>Country</label><input type="text" id="f_country" value="${esc(data.country||'India')}" placeholder="Country"></div>
           <div class="form-group"><label>City</label><input type="text" id="f_city" value="${esc(data.city||'')}" placeholder="City"></div>
@@ -1914,9 +1949,15 @@ const ManualForm = {
           <label>📅 Date of Capture</label>
           <input type="text" id="f_captureDate" value="${esc(captureDate)}" placeholder="Auto-filled on scan" style="background:#f8f9fa" readonly>
         </div>
-        <div class="form-group">
-          <label>📋 Raw OCR Data (from visiting card scan)</label>
-          <textarea id="f_rawOcrData" rows="4" style="background:#f8f9fa;font-size:12px" readonly>${esc(ocrData)}</textarea>
+        <div class="form-group" style="margin-top:20px">
+          <label style="font-size:15px;font-weight:700;color:var(--primary);margin-bottom:8px">📋 Raw OCR Data — Visiting Card Scan</label>
+          <div class="ocr-collapse-header" id="ocrCollapseHeader" onclick="ManualForm.toggleOcrCollapse()">
+            <span>Tap to view / edit raw OCR text</span>
+            <span class="chevron">▼</span>
+          </div>
+          <div class="ocr-collapse-body" id="ocrCollapseBody">
+            <textarea id="f_rawOcrData" rows="8" placeholder="No OCR data captured">${esc(ocrData)}</textarea>
+          </div>
         </div>
       </div>
 
@@ -1996,12 +2037,63 @@ const ManualForm = {
         <button class="btn btn-primary" onclick="ManualForm.save()">${isEdit ? '💾 Update Lead' : '💾 Save Lead'}</button>
       </div>
     `;
+
+    // Restore extra phone fields if editing or from scan data
+    if (isEdit && lead) {
+      this.restoreExtraPhones(lead);
+    } else if (this.currentScanData && this.currentScanData.fields) {
+      var f = this.currentScanData.fields;
+      if (f.phone2) this.addPhoneField(f.phone2);
+      if (f.phone3) this.addPhoneField(f.phone3);
+      if (f.phone4) this.addPhoneField(f.phone4);
+      if (f.phone5) this.addPhoneField(f.phone5);    }
   },
 
   prefillFromScan(raw, fields, dup) {
     this.currentScanData = { raw, fields };
     // Switch to manual form view
     App.navigate('manual');
+  },
+
+  addPhoneField(value) {
+    this.phoneFieldCount++;
+    var num = this.phoneFieldCount;
+    var container = document.getElementById('extraPhonesContainer');
+    if (!container) return;
+    var div = document.createElement('div');
+    div.className = 'phone-extra-field';
+    div.id = 'phoneExtra_' + num;
+    div.innerHTML =
+      '<input type="tel" id="f_phone' + num + '" value="' + esc(value || '') + '" placeholder="+91...">' +
+      '<button type="button" class="phone-remove-btn" onclick="ManualForm.removePhoneField(' + num + ')" title="Remove">×</button>';
+    container.appendChild(div);
+  },
+
+  removePhoneField(num) {
+    var div = document.getElementById('phoneExtra_' + num);
+    if (div) div.remove();
+  },
+
+  toggleOcrCollapse() {
+    var header = document.getElementById('ocrCollapseHeader');
+    var body = document.getElementById('ocrCollapseBody');
+    if (!header || !body) return;
+    header.classList.toggle('expanded');
+    body.classList.toggle('expanded');
+  },
+
+  restoreExtraPhones(lead) {
+    // Restore phone2, phone3, etc. from saved lead data
+    this.phoneFieldCount = 1;
+    var container = document.getElementById('extraPhonesContainer');
+    if (container) container.innerHTML = '';
+    if (!lead) return;
+    for (var i = 2; i <= 10; i++) {
+      var key = 'phone' + i;
+      if (lead[key]) {
+        this.addPhoneField(lead[key]);
+      }
+    }
   },
 
   selectChip(btn, hiddenId, value) {
@@ -2098,6 +2190,10 @@ const ManualForm = {
       name, company,
       designation: val('f_designation'),
       phone: val('f_phone'),
+      phone2: val('f_phone2'),
+      phone3: val('f_phone3'),
+      phone4: val('f_phone4'),
+      phone5: val('f_phone5'),
       email: val('f_email'),
       country: val('f_country'),
       city: val('f_city'),
@@ -2313,6 +2409,10 @@ const Leads = {
         <h3 style="font-size:16px;font-weight:700;margin-bottom:14px;padding-bottom:10px;border-bottom:2px solid var(--border)">📋 Contact Details</h3>
         ${lead.eventName ? `<div class="detail-row"><span class="dr-label">Event</span><span class="dr-value">${esc(lead.eventName)}</span></div>` : ''}
         ${lead.phone ? `<div class="detail-row"><span class="dr-label">Phone</span><span class="dr-value">${esc(lead.phone)}</span></div>` : ''}
+        ${lead.phone2 ? `<div class="detail-row"><span class="dr-label">Phone 2</span><span class="dr-value">${esc(lead.phone2)}</span></div>` : ''}
+        ${lead.phone3 ? `<div class="detail-row"><span class="dr-label">Phone 3</span><span class="dr-value">${esc(lead.phone3)}</span></div>` : ''}
+        ${lead.phone4 ? `<div class="detail-row"><span class="dr-label">Phone 4</span><span class="dr-value">${esc(lead.phone4)}</span></div>` : ''}
+        ${lead.phone5 ? `<div class="detail-row"><span class="dr-label">Phone 5</span><span class="dr-value">${esc(lead.phone5)}</span></div>` : ''}
         ${lead.email ? `<div class="detail-row"><span class="dr-label">Email</span><span class="dr-value">${esc(lead.email)}</span></div>` : ''}
         ${lead.country ? `<div class="detail-row"><span class="dr-label">Country</span><span class="dr-value">${esc(lead.country)}</span></div>` : ''}
         ${lead.city ? `<div class="detail-row"><span class="dr-label">City</span><span class="dr-value">${esc(lead.city)}</span></div>` : ''}
@@ -2575,13 +2675,14 @@ const Export = {
     const leads = await this.getFiltered();
     if (leads.length === 0) { App.toast('No leads to export with current filters', 'error'); return; }
 
-    const headers = ['Lead ID','Date','Time','Salesperson','Event','Visitor Name','Company','Designation','Mobile','Email','Country','City','Badge ID','LinkedIn','Website','Raw Badge Data','Raw OCR Data','Date of Capture','Visitor Type','Lead Source','Priority','Interest','Volume','Timeline','Customer Requirement','Follow-up','Follow-up Date','Follow-up Type','Follow-up Status','Remarks','Created At','Updated At','Synced At','Sync Status'];
+    const headers = ['Lead ID','Date','Time','Salesperson','Event','Visitor Name','Company','Designation','Mobile','Mobile 2','Mobile 3','Mobile 4','Mobile 5','Email','Country','City','Badge ID','LinkedIn','Website','Raw Badge Data','Raw OCR Data','Date of Capture','Visitor Type','Lead Source','Priority','Interest','Volume','Timeline','Customer Requirement','Follow-up','Follow-up Date','Follow-up Type','Follow-up Status','Remarks','Created At','Updated At','Synced At','Sync Status'];
 
     const rows = leads.map(l => [
       l.id||'', l.date||'', l.time||'', l.salesperson||'',
       l.eventName||'',
       l.name||'', l.company||'', l.designation||'',
-      l.phone||'', l.email||'', l.country||'', l.city||'',
+      l.phone||'', l.phone2||'', l.phone3||'', l.phone4||'', l.phone5||'',
+      l.email||'', l.country||'', l.city||'',
       l.badgeId||'', l.linkedin||'', l.website||'', l.rawBadgeData||'',
       l.rawOcrData||'', l.captureDate||'',
       l.visitorType||'',

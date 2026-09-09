@@ -151,6 +151,21 @@ a{text-decoration:none;color:inherit}
 .form-card{background:#fff;border-radius:var(--radius);padding:20px;margin-bottom:16px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
 .form-card h3{font-size:16px;font-weight:700;margin-bottom:14px;padding-bottom:10px;border-bottom:2px solid var(--border)}
 .field-row{display:grid;grid-template-columns:1fr;gap:12px}
+/* Collapsible raw OCR field */
+.ocr-collapse-header{display:flex;align-items:center;justify-content:space-between;cursor:pointer;padding:10px 14px;background:#f0f4f8;border:2px solid var(--border);border-radius:10px;font-size:13px;font-weight:600;color:var(--text);transition:background .2s}
+.ocr-collapse-header:hover{background:#e3eaf3}
+.ocr-collapse-header .chevron{transition:transform .3s;font-size:14px}
+.ocr-collapse-header.expanded .chevron{transform:rotate(180deg)}
+.ocr-collapse-body{display:none;margin-top:0;border:2px solid var(--border);border-top:none;border-radius:0 0 10px 10px;overflow:hidden}
+.ocr-collapse-body.expanded{display:block}
+.ocr-collapse-body textarea{width:100%;border:none;border-radius:0;padding:12px 14px;font-size:12px;font-family:monospace;line-height:1.5;color:#333;background:#fafbfc;resize:vertical;min-height:200px}
+/* Add phone button */
+.add-phone-btn{display:inline-flex;align-items:center;gap:4px;padding:6px 14px;background:var(--primary);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .2s}
+.add-phone-btn:hover{opacity:.9}
+.phone-extra-field{display:flex;gap:8px;align-items:flex-start;margin-top:8px}
+.phone-extra-field input{flex:1}
+.phone-remove-btn{flex-shrink:0;width:42px;height:46px;border:none;border-radius:10px;background:#fee;color:#dc3545;font-size:20px;font-weight:700;cursor:pointer;transition:background .2s}
+.phone-remove-btn:hover{background:#fdd}
 .chip-group{display:flex;flex-wrap:wrap;gap:8px}
 .chip{padding:9px 16px;border-radius:20px;border:2px solid var(--border);font-size:13px;font-weight:600;color:var(--text-muted);background:#fff;transition:.15s}
 .chip.active{background:var(--primary);border-color:var(--primary);color:#fff}
