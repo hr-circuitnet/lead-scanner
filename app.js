@@ -5,10 +5,14 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v30';
+const APP_VERSION = 'circuitnet-v34';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
+const DEFAULT_VISITOR_TYPES = ['Visitor','VIP','Exhibitor','Press','Delegate','Speaker','Other'];
+const DEFAULT_PRIORITIES = ['Hot','Warm','Cold'];
+const DEFAULT_FOLLOWUP_TYPES = ['Phone Call','Email','WhatsApp','Meeting','Site Visit'];
+const DEFAULT_FOLLOWUP_STATUSES = ['Pending','In Progress','Completed','Cancelled'];
 const FOLLOWUP_TYPES = ['Phone Call','Email','WhatsApp','Meeting','Site Visit'];
 
 let db = null;
@@ -106,6 +110,9 @@ var CAMEL_COLS = {
   'rawbadgedata':'rawBadgeData','rawocrdata':'rawOcrData','capturedate':'captureDate',
   'phone2':'phone2','phone3':'phone3','phone4':'phone4','phone5':'phone5',
   'visitortype':'visitorType',
+  'address':'address',
+  'state':'state','pincode':'pincode',
+  'department':'department',
   'leadsource':'leadSource','customerrequirement':'customerRequirement',
   'followup':'followUp','followupdate':'followUpDate',
   'followuptype':'followUpType','followupstatus':'followUpStatus',
@@ -231,13 +238,34 @@ const Cloud = {
 
   async upsert(table, row, conflictCol) {
     var col = conflictCol || 'id';
+    var payload = toLowerKeys(row);
+    // Strip empty/null values to reduce chance of schema mismatch
+    for (var k in payload) {
+      if (payload[k] === null || payload[k] === undefined) delete payload[k];
+    }
     var resp = await fetch(SB_REST + '/' + table + '?on_conflict=' + col, {
       method: 'POST',
       headers: sbHeaders({ 'Prefer': 'resolution=merge-duplicates' }),
-      body: JSON.stringify(toLowerKeys(row))
+      body: JSON.stringify(payload)
     });
     if (!resp.ok) {
       var body = await resp.text();
+      // If 400 with column-not-found, strip the missing column and retry once
+      if (resp.status === 400 && body.indexOf('Could not find the') >= 0) {
+        var m = body.match(/'([a-z]+)' column/);
+        if (m) {
+          this.log('⚠️ Column ' + m[1] + ' not in Supabase schema — retrying without it');
+          delete payload[m[1]];
+          // Also strip from CAMEL_COLS mapping so future calls skip it
+          resp = await fetch(SB_REST + '/' + table + '?on_conflict=' + col, {
+            method: 'POST',
+            headers: sbHeaders({ 'Prefer': 'resolution=merge-duplicates' }),
+            body: JSON.stringify(payload)
+          });
+          if (resp.ok) return true;
+          body = await resp.text();
+        }
+      }
       throw new Error('upsert ' + table + ': ' + resp.status + ' ' + body);
     }
     return true;
@@ -369,11 +397,22 @@ const Cloud = {
       this.log('syncDown: ' + cloudUsers.length + ' users');
     } catch (e) { this.log('❌ syncDown users: ' + e.message); }
 
-    // === CATEGORIES ===
+    // === CATEGORIES (dedup by name to prevent duplicates from multi-phone sync) ===
     try {
       var cloudCats = await this.fetchAll('categories');
-      for (var i = 0; i < cloudCats.length; i++) await dbPut('categories', cloudCats[i]);
-      this.log('syncDown: ' + cloudCats.length + ' categories');
+      var localCats = await dbGetAll('categories');
+      var seenNames = {};
+      for (var i = 0; i < localCats.length; i++) seenNames[localCats[i].name.toLowerCase()] = true;
+      var added = 0;
+      for (var i = 0; i < cloudCats.length; i++) {
+        var cn = (cloudCats[i].name || '').toLowerCase();
+        if (cn && !seenNames[cn]) {
+          await dbPut('categories', cloudCats[i]);
+          seenNames[cn] = true;
+          added++;
+        }
+      }
+      this.log('syncDown: ' + cloudCats.length + ' categories from cloud, ' + added + ' new added');
     } catch (e) { this.log('❌ syncDown cats: ' + e.message); }
 
     // === EVENTS ===
@@ -437,6 +476,7 @@ const App = {
     await this.seedDefaults();
     await this.loadSettings();
     await this.populateLoginUsers();
+    this.updateEventDisplay(); // Set event name on login page
     this.initOnlineDetection();
     this.initServiceWorker();
     // Sync with cloud on startup (push local pending, pull cloud data)
@@ -506,18 +546,41 @@ const App = {
       await dbPut('users', { id: 'u-sales2', name: 'Priya Sharma', username: 'priya', password: 'pass123', role: 'salesperson', active: true, created: new Date().toISOString() });
       await dbPut('users', { id: 'u-sales3', name: 'Arun Menon', username: 'arun', password: 'pass123', role: 'salesperson', active: true, created: new Date().toISOString() });
     }
-    // Seed categories
+    // Seed categories (dedup by name — only add missing ones)
     const cats = await dbGetAll('categories');
-    if (cats.length === 0) {
-      for (const c of DEFAULT_CATEGORIES) {
+    const existingNames = {};
+    cats.forEach(function(c) { existingNames[(c.name||'').toLowerCase()] = true; });
+    for (const c of DEFAULT_CATEGORIES) {
+      if (!existingNames[c.toLowerCase()]) {
         await dbPut('categories', { id: 'cat-' + Date.now() + '-' + Math.random().toString(36).slice(2,8), name: c, active: true });
+        existingNames[c.toLowerCase()] = true;
       }
     }
+    // Clean up duplicate categories (keep first occurrence of each name)
+    await this.dedupCategories();
     // Seed default event
     const events = await dbGetAll('events');
     if (events.length === 0) {
       await dbPut('events', { id: 'evt-1', name: 'Electronica 2026', venue: 'BIEC Bengaluru, Hall 3, Stall D15', date: '2026-09-08', active: true, created: new Date().toISOString() });
     }
+  },
+
+  async dedupCategories() {
+    var cats = await dbGetAll('categories');
+    var seen = {};
+    var dupes = [];
+    for (var i = 0; i < cats.length; i++) {
+      var key = (cats[i].name || '').toLowerCase();
+      if (seen[key]) {
+        dupes.push(cats[i].id);
+      } else {
+        seen[key] = true;
+      }
+    }
+    for (var i = 0; i < dupes.length; i++) {
+      await dbDelete('categories', dupes[i]);
+    }
+    if (dupes.length > 0) console.log('Cleaned up ' + dupes.length + ' duplicate categories');
   },
 
   async loadSettings() {
@@ -551,6 +614,7 @@ const App = {
     if (!evt) return;
     App.currentEvent = { id: evt.id, name: evt.name };
     localStorage.setItem('cn_current_event', JSON.stringify(App.currentEvent));
+    App.updateEventDisplay();
     // Update the event selector UI
     var sel = document.getElementById('eventSelector');
     if (sel) sel.value = eventId;
@@ -583,6 +647,7 @@ const App = {
   async doLogin() {
     var username = document.getElementById('loginUser').value.trim();
     var pass = document.getElementById('loginPass').value;
+    var role = document.getElementById('loginRole').value;
     var errEl = document.getElementById('loginError');
     errEl.textContent = '';
     if (!username) { errEl.textContent = 'Enter username'; return; }
@@ -591,44 +656,14 @@ const App = {
     var user = users.find(function(u){ return u.username && u.username.toLowerCase() === username.toLowerCase() && u.active; });
     if (!user) { errEl.textContent = 'Invalid username or password'; return; }
     if (user.password !== pass) { errEl.textContent = 'Invalid username or password'; return; }
-    currentUser = user;
-    localStorage.setItem('cn_user', JSON.stringify(user));
-    this.showApp();
-    this.toast('Welcome, ' + user.name, 'success');
-  },
-
-  switchLoginTab(tab) {
-    var userTab = document.getElementById('tabUserLogin');
-    var adminTab = document.getElementById('tabAdminLogin');
-    var userFields = document.getElementById('userLoginFields');
-    var adminFields = document.getElementById('adminLoginFields');
-    if (tab === 'admin') {
-      userTab.style.background = '#fff'; userTab.style.color = 'var(--text-muted)';
-      adminTab.style.background = 'var(--primary)'; adminTab.style.color = '#fff';
-      userFields.style.display = 'none';
-      adminFields.style.display = 'block';
-    } else {
-      userTab.style.background = 'var(--primary)'; userTab.style.color = '#fff';
-      adminTab.style.background = '#fff'; adminTab.style.color = 'var(--text-muted)';
-      userFields.style.display = 'block';
-      adminFields.style.display = 'none';
+    // If admin role selected, verify user is actually an admin
+    if (role === 'admin' && user.role !== 'admin') {
+      errEl.textContent = 'This user does not have admin access'; return;
     }
-  },
-
-  async doAdminLogin() {
-    var username = document.getElementById('loginAdminUser').value.trim();
-    var pass = document.getElementById('loginAdminPass').value;
-    var errEl = document.getElementById('adminLoginError');
-    errEl.textContent = '';
-    if (!username) { errEl.textContent = 'Enter admin username'; return; }
-    var users = await dbGetAll('users');
-    var user = users.find(function(u){ return u.username && u.username.toLowerCase() === username.toLowerCase() && u.active && u.role === 'admin'; });
-    if (!user) { errEl.textContent = 'Invalid admin credentials'; return; }
-    if (user.password !== pass) { errEl.textContent = 'Invalid admin credentials'; return; }
     currentUser = user;
     localStorage.setItem('cn_user', JSON.stringify(user));
     this.showApp();
-    this.toast('Welcome Admin, ' + user.name, 'success');
+    this.toast('Welcome, ' + user.name + (user.role === 'admin' ? ' (Admin)' : ''), 'success');
   },
 
   /**
@@ -697,10 +732,34 @@ const App = {
     // Show/hide admin items
     const adminItems = document.querySelectorAll('.admin-only');
     adminItems.forEach(el => el.style.display = currentUser.role === 'admin' ? '' : 'none');
+    // Update dynamic event name in drawer
+    this.updateEventDisplay();
+    // Update version in drawer
+    var vEl = document.getElementById('drawerVersion');
+    if (vEl) vEl.textContent = 'Version: ' + APP_VERSION;
     this.navigate('dashboard');
     Dashboard.render();
     this.updateSyncBadge();
     this.populateEventSelector();
+  },
+
+  updateEventDisplay() {
+    var evtName = (App.currentEvent && App.currentEvent.name) ? App.currentEvent.name : (App.settings.eventName || 'Electronica 2026');
+    var venue = (App.settings.venue || 'BIEC Bengaluru, Hall 3, Stall D15');
+    var dEl = document.getElementById('drawerEventName');
+    if (dEl) dEl.textContent = evtName + ' · ' + venue;
+    var lEl = document.getElementById('loginEventTag');
+    if (lEl) lEl.textContent = evtName.toUpperCase() + ' · ' + venue.toUpperCase();
+  },
+
+  getDropdownOptions(key) {
+    var dd = App.settings.dropdownOptions;
+    if (!dd) return null;
+    var val = dd[key];
+    if (!val) return null;
+    // Parse newline-separated text into array
+    var arr = val.split('\n').map(function(s){ return s.trim(); }).filter(function(s){ return s.length > 0; });
+    return arr.length > 0 ? arr : null;
   },
 
   async navigate(view) {
@@ -1560,6 +1619,27 @@ const CardScanner = {
       fields.rawBadgeData = rawText;
       fields.ocrSource = usedApi ? 'OCR.space' : 'Tesseract (offline)';
 
+      // If this is the back side scan, combine with front side data
+      if (self.isBackSide && self.pendingRawText) {
+        // Combine raw text: front side first, then back side
+        var combinedRaw = self.pendingRawText + '\n--- BACK SIDE ---\n' + rawText;
+        // Re-parse the combined text for better field extraction
+        var combinedFields = self.parseCardText(combinedRaw);
+        // Merge: use front side fields as base, fill in missing from back side
+        var frontFields = self.pendingFields || {};
+        for (var key in frontFields) {
+          if (frontFields[key] && !combinedFields[key]) combinedFields[key] = frontFields[key];
+        }
+        combinedFields.rawBadgeData = combinedRaw;
+        combinedFields.ocrSource = usedApi ? 'OCR.space' : 'Tesseract (offline)';
+        fields = combinedFields;
+        rawText = combinedRaw;
+        // Reset back side flag
+        self.isBackSide = false;
+        self.pendingFields = null;
+        self.pendingRawText = null;
+      }
+
       // Remove overlay
       overlay.remove();
 
@@ -1699,22 +1779,23 @@ const CardScanner = {
   parseCardText(text) {
     var cleaned = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/~/g, '').replace(/\n{3,}/g, '\n\n').trim();
     var lines = cleaned.split(/\n/).map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 1; });
-    // Keep lines that have useful content: labeled info, @, phone numbers, URLs, or decent letter ratio
+    // Keep lines with useful content
     lines = lines.filter(function(l) {
-      if (/^(Telephone|Mob|Mobile|Phone|Tel|Email|Website|URL|Web|Fax|Ph|P|M|T|E|W)\s*[:\-]/i.test(l)) return true;
+      if (/^(Telephone|Mob|Mobile|Cell|Phone|Tel|Email|E-mail|Mail|Website|URL|Web|Site|Fax|Address|Office|Registered|Branch|Corporate|LinkedIn|Linkedin|Ph|P|M|T|E|W|Pin|ZIP|Postal)\s*[:\-.]/i.test(l)) return true;
       if (l.indexOf('@') >= 0) return true;
       if (l.match(/\d{10,}/)) return true;
       if (l.match(/\+\d{1,3}[-\s]?\d{5,}/)) return true;
       if (/^www\./i.test(l) || /^https?:\/\//i.test(l)) return true;
+      if (/linkedin\.com/i.test(l)) return true;
+      if (/[\u2600-\u27BF\u2300-\u23FF\u25A0-\u25FF\u2B00-\u2BFF]/.test(l)) return true; // symbols
       var letterCount = (l.match(/[a-zA-Z]/g) || []).length;
       if (letterCount < 2) return false;
-      if (letterCount / l.length < 0.4) return false;
+      if (letterCount / l.length < 0.35) return false;
       return true;
     });
 
     var fields = {};
     var usedLines = {};
-
     function hasKeyword(line, keywords) {
       var u = line.toUpperCase();
       for (var i = 0; i < keywords.length; i++) { if (u.indexOf(keywords[i].toUpperCase()) >= 0) return true; }
@@ -1723,116 +1804,369 @@ const CardScanner = {
     function markUsed(idx) { usedLines[idx] = true; }
     function isUsedIdx(idx) { return !!usedLines[idx]; }
 
-    // === EMAIL RULE: Full email containing @ and domain ===
-    for (var i = 0; i < lines.length; i++) {
-      var m = lines[i].match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-      if (m) { fields.email = m[0]; markUsed(i); break; }
+    // Check if a line is a known ID (GSTIN, PAN, CIN) that should not be treated as phone
+    function isIdNumber(line) {
+      var digits = line.replace(/\D/g, '');
+      // GSTIN: 15 digits, pattern 2 digits + 5 letters + 4 digits + 1 letter + 1 alphanumeric + 1 digit
+      if (/\d{2}[A-Z]{5}\d{4}[A-Z]\d[A-Z]\d/i.test(line)) return true;
+      // PAN: 5 letters + 4 digits + 1 letter
+      if (/[A-Z]{5}\d{4}[A-Z]/i.test(line) && line.replace(/\s/g,'').length <= 10) return true;
+      // CIN: 21 characters starting with U
+      if (/^U\d{20}/.test(line.replace(/\s/g,''))) return true;
+      // Employee ID patterns: EMP followed by digits
+      if (/^EMP/i.test(line) || /^EID/i.test(line)) return true;
+      return false;
     }
 
-    // === PHONE RULE: Extract ALL phone numbers found on the card ===
-    // First pass: collect all labeled phones (Mob/Mobile/Tel/Phone/Ph)
+    function isExcluded(line) {
+      if (line.indexOf('@') >= 0) return true;
+      if (line.match(/\+\d{5,}/)) return true;
+      if (line.match(/\d{10,}/)) return true;
+      if (/^www\./i.test(line) || /^https?:\/\//i.test(line)) return true;
+      if (/linkedin\.com/i.test(line)) return true;
+      if (isIdNumber(line)) return true;
+      return false;
+    }
+
+    // Helper: normalize phone number (remove spaces, hyphens, brackets for comparison)
+    function normalizePhone(num) {
+      return num.replace(/[\s\-()]/g, '');
+    }
+
+    // === EMAIL RULE ===
+    // Labels: Email, E-mail, Mail, E:, Email Id, Electronic Mail
+    // Must contain @, valid domain, valid extension
+    // Fix OCR errors: .corn→.com, spaces around @, remove trailing punctuation
+    // Support multiple emails
+    var allEmails = [];
+    for (var i = 0; i < lines.length; i++) {
+      if (isUsedIdx(i)) continue;
+      // Check labeled email lines first
+      var emLabel = lines[i].match(/^(?:Email|E-mail|Mail|E)\s*[:\-]\s*(.+)/i);
+      if (emLabel && emLabel[1]) {
+        var em = emLabel[1].match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+        if (em) {
+          var email = em[0].replace(/\.corn$/i, '.com').replace(/\s+/g, '').replace(/[;,\s]+$/, '').toLowerCase();
+          allEmails.push(email);
+          markUsed(i);
+          continue;
+        }
+      }
+      // Raw email anywhere in line
+      var ems = lines[i].match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+      if (ems) {
+        ems.forEach(function(e) {
+          allEmails.push(e.replace(/\.corn$/i, '.com').replace(/\s+/g, '').replace(/[;,\s]+$/, '').toLowerCase());
+        });
+        markUsed(i);
+      }
+    }
+    if (allEmails.length > 0) {
+      fields.email = allEmails[0];
+      if (allEmails[1]) fields.email2 = allEmails[1];
+    }
+
+    // === PHONE/MOBILE/TELEPHONE RULE ===
+    // Mobile labels: Mob, Mobile, M, Cell, WhatsApp, Whatsapp, Wa, M:
+    // Telephone labels: Tel, Telephone, Phone, Ph, T, Landline, Office, O, T:, Ph:, D:
+    // Symbols: 📞 ☎ 📱 (OCR may render these as text)
+    // Exclude: PIN codes (6 digits 5XXXXX), GSTIN (15 digits), PAN (10 alphanumeric), CIN (21 chars), employee IDs
+    // Normalize: remove spaces/hyphens/brackets for stored comparison, preserve original display value
+    // Support +91, international numbers, 7-15 digits
     var allPhones = [];
     var seenPhoneDigits = {};
-    function addPhone(num) {
-      var digits = num.replace(/\D/g, '');
-      if (digits.length < 8) return; // skip too-short
-      if (seenPhoneDigits[digits]) return; // dedup
+    function addPhone(num, isMobile) {
+      var orig = num.trim();
+      var digits = orig.replace(/\D/g, '');
+      if (digits.length < 7 || digits.length > 15) return;
+      // Exclude PIN codes (6 digits starting with 5-8)
+      if (digits.length === 6 && /^[5-8]\d{5}$/.test(digits)) return;
+      // Exclude GSTIN (15 digits that match GSTIN pattern)
+      if (digits.length === 15) return;
+      // Exclude CIN (starts with U + 20 digits)
+      if (digits.length === 21 && orig.charAt(0) === 'U') return;
+      // Dedup
+      if (seenPhoneDigits[digits]) return;
       seenPhoneDigits[digits] = true;
-      allPhones.push(num.trim());
+      allPhones.push({ num: orig, isMobile: isMobile, digits: digits });
     }
+    // First pass: labeled phones
     for (var i = 0; i < lines.length; i++) {
       if (isUsedIdx(i)) continue;
-      // Match Mob/Mobile labels
-      var lm = lines[i].match(/^(Mob|Mobile)\s*[:\-]?\s*(.+)/i);
-      if (lm && lm[2]) {
-        var pc = lm[2].match(/\+?[\d\s-]{8,}/);
-        if (pc) { addPhone(pc[0]); markUsed(i); continue; }
+      if (isIdNumber(lines[i])) continue;
+      // Mobile labels: Mob, Mobile, M, Cell, WhatsApp, Whatsapp, Wa
+      var lm = lines[i].match(/^(?:Mob(?:ile)?|Cell|M|WhatsApp|Whatsapp|Wa)\s*[:\-.]?\s*(.+)/i);
+      if (lm && lm[1]) {
+        var pc = lm[1].match(/\+?[\d\s\-().]{8,}/);
+        if (pc) { addPhone(pc[0], true); markUsed(i); continue; }
       }
-      // Match Tel/Telephone/Phone/Ph/T labels
-      lm = lines[i].match(/^(Telephone|Tel|Phone|Ph|T)\s*[:\-]\s*(.+)/i);
-      if (lm && lm[2]) {
-        var pc = lm[2].match(/\+?[\d\s-]{8,}/);
-        if (pc) { addPhone(pc[0]); markUsed(i); continue; }
+      // Telephone labels: Tel, Telephone, Phone, Ph, T, Landline, Office, O, D (Direct)
+      lm = lines[i].match(/^(?:Telephone|Tel|Phone|Ph|T|Landline|Office|O|D|Direct)\s*[:\-.]\s*(.+)/i);
+      if (lm && lm[1]) {
+        var pc = lm[1].match(/\+?[\d\s\-().]{8,}/);
+        if (pc) { addPhone(pc[0], false); markUsed(i); continue; }
+      }
+      // Symbol-prefixed: 📞 ☎ 📱 followed by digits
+      if (/^[📞☎📱]\s*(.+)/.test(lines[i])) {
+        var sm = lines[i].match(/^[📞☎📱]\s*(.+)/);
+        if (sm && sm[1]) {
+          var pc = sm[1].match(/\+?[\d\s\-().]{8,}/);
+          if (pc) { addPhone(pc[0], /📱/.test(lines[i])); markUsed(i); continue; }
+        }
       }
     }
-    // Second pass: find raw phone numbers in unused lines (+91... or 10-digit)
+    // Second pass: raw phone numbers (unlabeled)
     for (var i = 0; i < lines.length; i++) {
       if (isUsedIdx(i)) continue;
+      if (isIdNumber(lines[i])) continue;
       // +91 with flexible grouping
       var matches = lines[i].match(/\+91[\s-]?\d{2,4}[\s-]?\d{3,5}[\s-]?\d{2,5}/g);
-      if (matches) { matches.forEach(addPhone); continue; }
-      // 10-digit Indian mobile
-      matches = lines[i].match(/(?:^|\s)([6-9]\d{9})(?:\s|$)/g);
-      if (matches) { matches.forEach(function(m){ addPhone(m.trim()); }); }
+      if (matches) { matches.forEach(function(m){ addPhone(m, true); }); continue; }
+      // International +XX
+      matches = lines[i].match(/\+\d{1,3}[\s-]?\d{2,4}[\s-]?\d{3,5}[\s-]?\d{2,5}/g);
+      if (matches) { matches.forEach(function(m){ addPhone(m, false); }); continue; }
+      // 10-digit Indian mobile (6-9 prefix)
+      matches = lines[i].match(/\b[6-9]\d{9}\b/g);
+      if (matches) { matches.forEach(function(m){ addPhone(m, true); }); continue; }
+      // Landline: 0XX-XXXXXXX or 0XXX-XXXXXXX
+      matches = lines[i].match(/\b0\d{2,4}[\s-]?\d{6,8}\b/g);
+      if (matches) { matches.forEach(function(m){ addPhone(m, false); }); continue; }
+      // Generic 7-15 digit with spaces/hyphens
+      if (!allPhones.length) {
+        matches = lines[i].match(/\b\d{3}[\s-]?\d{3,4}[\s-]?\d{3,4}\b/g);
+        if (matches) { matches.forEach(function(m){ addPhone(m, false); }); }
+      }
     }
-    // Third pass: scan full text for any remaining phones
+    // Third pass: full text scan
     if (allPhones.length === 0) {
       var allText = lines.join(' ');
       var pm = allText.match(/\+91[\s-]?\d{2,4}[\s-]?\d{3,5}[\s-]?\d{2,5}/);
-      if (pm) addPhone(pm[0]);
-      pm = allText.match(/\+?91[\s-]?\d{5}[\s-]?\d{5}/);
-      if (pm) addPhone(pm[0]);
-      pm = allText.match(/(?:^|\s)([6-9]\d{9})(?:\s|$)/);
-      if (pm) addPhone(pm[1]);
+      if (pm) addPhone(pm[0], true);
+      pm = allText.match(/\+\d{1,3}[\s-]?\d{2,4}[\s-]?\d{3,5}[\s-]?\d{2,5}/);
+      if (pm) addPhone(pm[0], false);
+      pm = allText.match(/\b[6-9]\d{9}\b/);
+      if (pm) addPhone(pm[0], true);
+      pm = allText.match(/\b0\d{2,4}[\s-]?\d{6,8}\b/);
+      if (pm) addPhone(pm[0], false);
     }
-    // Assign to fields: phone, phone2, phone3, phone4, phone5
-    if (allPhones.length > 0) {
-      fields.phone = allPhones[0];
-      if (allPhones[1]) fields.phone2 = allPhones[1];
-      if (allPhones[2]) fields.phone3 = allPhones[2];
-      if (allPhones[3]) fields.phone4 = allPhones[3];
-      if (allPhones[4]) fields.phone5 = allPhones[4];
+    // Assign: prefer mobiles first, then landlines
+    var mobiles = allPhones.filter(function(p){ return p.isMobile; });
+    var landlines = allPhones.filter(function(p){ return !p.isMobile; });
+    var ordered = mobiles.concat(landlines);
+    if (ordered.length > 0) {
+      fields.phone = ordered[0].num;
+      if (ordered[1]) fields.phone2 = ordered[1].num;
+      if (ordered[2]) fields.phone3 = ordered[2].num;
+      if (ordered[3]) fields.phone4 = ordered[3].num;
+      if (ordered[4]) fields.phone5 = ordered[4].num;
     }
 
-    // === WEBSITE RULE: Line starting with www. or http, take first URL if pipe-separated ===
+    // === WEBSITE RULE ===
+    // Labels: Website, Web, URL, Site, W:, Web:
+    // Symbols: 🌐 🌍 🌏 (globe), 🔗 (link)
+    // Patterns: www.xxx, http://, https://, bare domain xxx.com
+    // TLDs: .com .in .co.in .net .org .ai .io .biz .co .uk .de .sg .us .eu .au .ca .fr .it .nl .se .ch .jp .cn .kr .tw .hk .ae .br .za .ru .pl .be .at .dk .no .fi .pt .ie .nz .my .th .id .ph .vn .tech .store .online .site .xyz .digital .info .club .design .dev .app .cloud .systems .electronics
+    // Exclude: email addresses (contains @)
+    // Remove trailing punctuation
+    var tldPattern = '(?:com|in|co\\.in|co\\.uk|net|org|ai|io|biz|co|uk|de|sg|us|eu|au|ca|fr|it|nl|se|ch|jp|cn|kr|tw|hk|ae|br|za|ru|pl|be|at|dk|no|fi|pt|ie|nz|my|th|id|ph|vn|tech|store|online|site|xyz|digital|info|club|design|dev|app|cloud|systems|electronics|india|company)';
     for (var i = 0; i < lines.length; i++) {
       if (isUsedIdx(i)) continue;
+      // Direct www or http
       if (/^www\./i.test(lines[i]) || /^https?:\/\//i.test(lines[i])) {
-        fields.website = lines[i].split('|')[0].trim();
+        var url = lines[i].split('|')[0].split(/\s+/)[0].replace(/[;,:)\s]+$/, '');
+        fields.website = url;
         markUsed(i); break;
       }
     }
-    // Also check W:/Web:/Website: labeled lines
+    // Labeled website: W:, Web:, Website:, URL:, Site:, 🌐, 🔗
     if (!fields.website) {
       for (var i = 0; i < lines.length; i++) {
         if (isUsedIdx(i)) continue;
-        var lm = lines[i].match(/^(Website|URL|Web|W)\s*[:\-]\s*(.+)/i);
-        if (lm && lm[2]) { fields.website = lm[2].split('|')[0].trim(); markUsed(i); break; }
+        var lm = lines[i].match(/^(?:Website|URL|Web|Site|W)\s*[:\-.]\s*(.+)/i);
+        if (lm && lm[1]) {
+          var url = lm[1].split('|')[0].split(/\s+/)[0].replace(/[;,:)\s]+$/, '');
+          if (url.indexOf('@') < 0 && url.length > 4) { fields.website = url; markUsed(i); break; }
+        }
+        // Globe/link symbol prefix
+        var sym = lines[i].match(/^[🌐🌍🌏🔗]\s*(.+)/);
+        if (sym && sym[1]) {
+          var url = sym[1].split(/\s+/)[0].replace(/[;,:)\s]+$/, '');
+          if (url.indexOf('@') < 0 && url.length > 4) { fields.website = url; markUsed(i); break; }
+        }
+      }
+    }
+    // Derive from email domain
+    if (!fields.website && fields.email) {
+      var domain = fields.email.split('@')[1];
+      var freeDomains = ['gmail','yahoo','hotmail','outlook','rediffmail','zoho','protonmail','live','msn','aol','icloud'];
+      var isFree = false;
+      for (var d = 0; d < freeDomains.length; d++) { if (domain.indexOf(freeDomains[d]) >= 0) { isFree = true; break; } }
+      if (!isFree && domain) fields.website = 'www.' + domain;
+    }
+    // Bare domain detection (company.com without www)
+    if (!fields.website) {
+      for (var i = 0; i < lines.length; i++) {
+        if (isUsedIdx(i)) continue;
+        var dm = lines[i].match(new RegExp('\\b([a-z0-9][-a-z0-9]+\\.' + tldPattern + ')\\b', 'i'));
+        if (dm && dm[0].indexOf('@') < 0 && dm[0].length > 5 && !isIdNumber(lines[i])) {
+          fields.website = 'www.' + dm[0].toLowerCase();
+          break;
+        }
       }
     }
 
-    // === DESIGNATION RULE: First unused line with no @, no 5+ digits, containing job title keywords ===
+    // === LINKEDIN RULE ===
+    // Labels: LinkedIn, Linkedin, LI:, in:
+    // Patterns: linkedin.com/in/xxx, linkedin.com/company/xxx
+    // Preserve complete URL, remove trailing punctuation
+    for (var i = 0; i < lines.length; i++) {
+      if (isUsedIdx(i)) continue;
+      if (/linkedin\.com/i.test(lines[i])) {
+        fields.linkedin = lines[i].replace(/[;,\s]+$/, '').trim();
+        markUsed(i); break;
+      }
+    }
+    if (!fields.linkedin) {
+      for (var i = 0; i < lines.length; i++) {
+        if (isUsedIdx(i)) continue;
+        var lm = lines[i].match(/^(?:LinkedIn|Linkedin|LI)\s*[:\-]\s*(.+)/i);
+        if (lm && lm[1]) { fields.linkedin = lm[1].trim().replace(/[;,\s]+$/, ''); markUsed(i); break; }
+        // "in" symbol prefix
+        if (/^[in]\s*[:\-]\s*(.+)/i.test(lines[i]) && /linkedin/i.test(lines[i])) {
+          fields.linkedin = lines[i].trim().replace(/[;,\s]+$/, ''); markUsed(i); break;
+        }
+      }
+    }
+
+    // === DESIGNATION RULE ===
+    // Keywords: Director, Managing Director, MD, CEO, CTO, CFO, COO, CIO, VP, Vice President,
+    //   President, General Manager, Manager, Senior Manager, Assistant Manager, Engineer,
+    //   Senior Engineer, Executive, Senior Executive, Officer, Founder, Co-Founder, Partner,
+    //   Proprietor, Owner, Head, Lead, Consultant, Specialist, Architect, Developer,
+    //   Coordinator, Supervisor, Principal, Sr, Jr
+    // Support abbreviations: MD, CEO, CTO, CFO, COO, CIO, VP, Sr, Jr
+    // Support combined: "VP - Sales", "Head of Marketing", "Director & CEO"
+    // Support with department: "Manager - Quality", "Head - R&D"
+    // Max 80 chars, no @, no 3+ consecutive digits
     var designationKeywords = [
-      'Managing Director','General Manager','Vice President','Supply Chain','Chief Executive','Chief Technology',
-      'Chief Financial','Chief Operating','Manager','Director','CEO','CTO','CFO','COO','Founder',
-      'Co-Founder','Proprietor','Engineer','Consultant','Architect','Designer','Analyst','Specialist',
+      'Managing Director','General Manager','Vice President','Chief Executive','Chief Technology',
+      'Chief Financial','Chief Operating','Chief Information','Business Development',
+      'Manager','Director','CEO','CTO','CFO','COO','CIO','MD','Founder','Co-Founder',
+      'Proprietor','Owner','Engineer','Consultant','Architect','Designer','Analyst','Specialist',
       'Officer','Executive','President','VP','Head','Lead','Supervisor','Coordinator','Developer',
-      'Programmer','Technician','Partner','Sr.','Senior','Junior'
+      'Programmer','Technician','Partner','Principal','Sr.','Senior','Junior','Associate',
+      'Assistant','Deputy','Trainee','Intern','Sales','Marketing','Operations','Production',
+      'Quality','Purchase','Procurement','R&D','Research','Accounts','Finance','HR',
+      'Human Resources','Admin','Administration','Project','Product','Service','Support',
+      'Technical','Training','Channel','Regional','National','Global','International',
+      'Chairman','Managing Partner','Technical Director','Executive Director','Whole-time Director',
+      'Additional Director','Independent Director','Non-Executive','Company Secretary','CFO',
+      'Territory Manager','Area Manager','Zonal Manager','National Head','Regional Head',
+      'Key Account Manager','Key Accounts','Strategic Accounts','Inside Sales','Field Sales',
+      'Pre-Sales','Post-Sales','Customer Success','Customer Experience','Digital Marketing',
+      'Brand Manager','Product Manager','Category Manager','Supply Chain','Logistics',
+      'Warehouse','Sourcing','Vendor Development','NPD','New Product Development',
+      'Embedded','Firmware','Hardware','Software','Testing','Validation','Quality Assurance',
+      'Plant Head','Factory Manager','Production Head','Maintenance','Tooling','Process',
+      'Industrial','Automation','Robotics','Sustainability','ESG','Compliance','Legal',
+      'Treasury','Audit','Tax','Payroll','Procurement Head','Sourcing Head','Export Head',
+      'Import','EMEA','APAC','North America','LATAM','Director Sales','Director Operations'
     ];
     for (var i = 0; i < lines.length; i++) {
       if (isUsedIdx(i)) continue;
-      if (lines[i].indexOf('@') >= 0) continue;
-      if (lines[i].match(/\+?\d{5,}/)) continue;
-      if (hasKeyword(lines[i], designationKeywords) && lines[i].length < 60) {
-        fields.designation = lines[i].replace(/^[^a-zA-Z]+/, '').trim();
+      if (isExcluded(lines[i])) continue;
+      if (lines[i].match(/\d{3,}/)) continue;
+      if (hasKeyword(lines[i], designationKeywords) && lines[i].length < 80) {
+        fields.designation = lines[i].replace(/^[^a-zA-Z]+/, '').replace(/[|]+/g, ' - ').trim();
         markUsed(i); break;
       }
     }
 
-    // === COMPANY RULE: Lines with Ltd/Technologies/Solutions/etc. Merge adjacent. Skip parenthetical. Pick longest. ===
-    var companyKeywords = ['Pvt Ltd','Private Limited','Pvt. Ltd.','Ltd','Limited','Inc','Corp','Corporation',
-      'Technologies','Solutions','Systems','Enterprises','Industries','Group','Company','Co.',
-      'LLP','LLC','GmbH','Sdn Bhd','Trading','Works','Labs','Electronics','Electricals'];
+    // === DEPARTMENT RULE ===
+    // Keywords: Sales, Marketing, Business Development, Technical, Engineering, Production,
+    //   Manufacturing, Quality, Purchase, Procurement, Operations, Finance, HR, Human Resources,
+    //   R&D, Research, Development, Administration, Service, Support, Export, Import
+    // Allow abbreviations: BD (Business Dev), Mktg, Ops, HR, Fin, QA, QC, R&D
+    // Allow with designation: "Manager - Quality", "Head - R&D"
+    var departmentKeywords = ['Sales','Marketing','Business Development','Technical','Engineering',
+      'Production','Manufacturing','Quality','Purchase','Procurement','Operations','Finance',
+      'HR','Human Resources','R&D','Research','Development','Administration','Service','Support',
+      'Export','Import','Quality Assurance','Quality Control','Supply Chain','Logistics',
+      'Warehouse','Sourcing','Vendor Development','NPD','New Product Development',
+      'Embedded','Firmware','Hardware','Software','Testing','Validation','Maintenance',
+      'Tooling','Process','Industrial','Automation','Robotics','Customer Success',
+      'Digital Marketing','Inside Sales','Field Sales','Pre-Sales','Post-Sales',
+      'Strategic Accounts','Key Accounts','Compliance','Legal','Audit','Tax','Treasury',
+      'Sustainability','ESG','BD','Mktg','Ops','QA','QC'];
+    for (var i = 0; i < lines.length; i++) {
+      if (isUsedIdx(i)) continue;
+      if (isExcluded(lines[i])) continue;
+      if (hasKeyword(lines[i], departmentKeywords) && lines[i].length < 60) {
+        // Skip if it's the designation line
+        if (fields.designation && fields.designation.toLowerCase().indexOf(lines[i].toLowerCase()) >= 0) continue;
+        // If designation contains " - " with department, extract department
+        if (fields.designation) {
+          var dashParts = fields.designation.split(/\s[-–]\s/);
+          if (dashParts.length > 1) {
+            for (var dp = 1; dp < dashParts.length; dp++) {
+              if (hasKeyword(dashParts[dp], departmentKeywords)) {
+                fields.department = dashParts[dp].trim();
+                break;
+              }
+            }
+          }
+        }
+        if (!fields.department) {
+          fields.department = lines[i].replace(/^[^a-zA-Z]+/, '').trim();
+          markUsed(i); break;
+        } else { break; }
+      }
+    }
+    // Also extract department from designation if it has " - " separator
+    if (!fields.department && fields.designation) {
+      var dashParts = fields.designation.split(/\s[-–]\s/);
+      if (dashParts.length > 1) {
+        for (var dp = 1; dp < dashParts.length; dp++) {
+          if (hasKeyword(dashParts[dp], departmentKeywords)) {
+            fields.department = dashParts[dp].trim();
+            fields.designation = dashParts[0].trim();
+            break;
+          }
+        }
+      }
+    }
+
+    // === COMPANY RULE ===
+    // Keywords: Pvt Ltd, Private Limited, Ltd, Limited, LLP, LLC, Inc, Incorporated,
+    //   Corporation, Corp, Co, Company, Industries, Technologies, Technology, Electronics,
+    //   Engineering, Solutions, Systems, Enterprises, Associates, Group, International,
+    //   Services, Labs, Laboratory, Works, Manufacturing, Trading
+    // Exclude: person names, designation, email, phone numbers
+    // Check email domain, website domain for company name derivation
+    var companyKeywords = ['Pvt Ltd','Private Limited','Pvt. Ltd.','Ltd','Limited','LLP','LLC',
+      'Inc','Incorporated','Corporation','Corp','Co.','Company','Industries','Technologies',
+      'Technology','Electronics','Electricals','Engineering','Solutions','Systems','Enterprises',
+      'Associates','Group','International','Services','Labs','Laboratory','Works','Manufacturing',
+      'Trading','Motors','Auto','Steel','Power','Energy','Solar','Tex','Spinning',
+      'Mills','Foods','Pharma','Healthcare','Hospital','Bank','Financial','Holdings',
+      'Machineries','Controls','Components','Automation','Robotics','Electrical',
+      'Plastics','Polymers','Rubber','Chemicals','Packaging','Logistics','Infotech',
+      'Softwares','Software','Digital','Analytics','Consultancy','Consultants',
+      'Constructions','Builders','Developers','Realty','Estates','Properties',
+      'Petroleum','Refineries','Minerals','Minerals','Cement','Textiles','Garments',
+      'Fashions','Retail','Wholesale','Distributors','Agencies','Traders',
+      'Scientific','Instruments','Devices','Medical','Diagnostics','Biotech',
+      'Agro','Farms','Foods','Beverages','Breweries','Distilleries'];
     var companyCandidates = [];
     for (var i = 0; i < lines.length; i++) {
       if (isUsedIdx(i)) continue;
-      if (lines[i].indexOf('@') >= 0) continue;
-      if (lines[i].match(/\+?\d{5,}/)) continue;
+      if (isExcluded(lines[i])) continue;
+      if (lines[i].match(/\d{3,}/)) continue;
       if (/^\(.*\)$/.test(lines[i])) continue; // Skip (A Division of...)
-      if (hasKeyword(lines[i], companyKeywords) && lines[i].length < 80) {
+      if (hasKeyword(lines[i], companyKeywords) && lines[i].length < 100) {
         var candidate = lines[i].replace(/^[^a-zA-Z#]+/, '').trim();
-        // Merge with previous line if it looks like a brand name (short, no digits, not parenthetical)
-        if (i > 0 && !isUsedIdx(i-1) && lines[i-1].indexOf('@') < 0 && !lines[i-1].match(/\+?\d{5,}/) && !/^\(.*\)$/.test(lines[i-1]) && lines[i-1].length < 50 && lines[i-1].length > 1) {
+        // Merge with previous line if it looks like a brand name
+        if (i > 0 && !isUsedIdx(i-1) && !isExcluded(lines[i-1]) && !/^\(.*\)$/.test(lines[i-1]) && lines[i-1].length < 50 && lines[i-1].length > 1 && !hasKeyword(lines[i-1], designationKeywords)) {
           candidate = lines[i-1].replace(/^[^a-zA-Z#]+/, '').trim() + ' ' + candidate;
           markUsed(i-1);
         }
@@ -1843,50 +2177,315 @@ const CardScanner = {
       companyCandidates.sort(function(a, b) { return b.length - a.length; });
       fields.company = companyCandidates[0];
     }
+    // Derive from email/website domain
+    if (!fields.company && fields.email) {
+      var domain = fields.email.split('@')[1];
+      var freeDomains = ['gmail','yahoo','hotmail','outlook','rediffmail','zoho','protonmail','live','msn','aol','icloud'];
+      var isFree = false;
+      for (var d = 0; d < freeDomains.length; d++) { if (domain.indexOf(freeDomains[d]) >= 0) { isFree = true; break; } }
+      if (!isFree && domain) {
+        var baseDomain = domain.split('.')[0];
+        fields.company = baseDomain.charAt(0).toUpperCase() + baseDomain.slice(1);
+      }
+    }
 
-    // === NAME RULE: First unused line, 2-4 words, all alphabetic, Title Case, not company/slogan ===
+    // === NAME RULE ===
+    // 2-5 words, alphabetic, allow initials (single letter with dot)
+    // Allow prefixes: Mr, Mrs, Ms, Dr, Prof, Er, Sri, Shri, Smt, Kum
+    // Allow suffixes: Jr, Sr, II, III
+    // Ignore: numbers, emails, URLs, company suffixes, designations
+    // Check proximity to designation (name usually appears just above designation)
+    var namePrefixes = /^(Mr|Mrs|Ms|Dr|Prof|Er|Sri|Shri|Smt|Kum)\.?$/i;
+    var nameSuffixes = /^(Jr|Sr|II|III|IV)$/i;
+    // Strategy: look for name near designation (line above designation is often the name)
+    var designationIdx = -1;
     for (var i = 0; i < lines.length; i++) {
-      if (isUsedIdx(i)) continue;
-      var l = lines[i];
-      if (l.indexOf('@') >= 0) continue;
-      if (l.match(/\d{3,}/)) continue;
-      if (l.match(/[@#:;]/)) continue;
-      if (l.match(/^[#\d]/)) continue;
-      if (l.indexOf('|') >= 0 || l.indexOf(' - ') >= 0) continue;
-      var words = l.split(/\s+/);
-      if (words.length >= 2 && words.length <= 4) {
-        var allAlpha = words.every(function(w) { return /^[A-Za-z.'-]+$/.test(w); });
-        if (allAlpha && !hasKeyword(l, companyKeywords)) {
-          // Must be Title Case (each word starts uppercase) — filters out taglines like "motherson d"
-          var isTitleCase = words.every(function(w) { return /^[A-Z]/.test(w); });
-          if (isTitleCase) { fields.name = l; break; }
+      if (fields.designation && lines[i].indexOf(fields.designation) >= 0) { designationIdx = i; break; }
+    }
+    // Try line above designation first
+    if (designationIdx > 0 && !isUsedIdx(designationIdx - 1)) {
+      var nameCandidate = lines[designationIdx - 1];
+      if (!isExcluded(nameCandidate) && !nameCandidate.match(/\d{3,}/) && !hasKeyword(nameCandidate, companyKeywords) && !hasKeyword(nameCandidate, designationKeywords)) {
+        var nameWords = nameCandidate.replace(/^(Mr|Mrs|Ms|Dr|Prof|Er|Sri|Shri|Smt|Kum)\.?\s+/i, '').trim().split(/\s+/);
+        if (nameWords.length >= 2 && nameWords.length <= 5) {
+          var validName = nameWords.every(function(w) {
+            return /^[A-Za-z.]+[-']?[A-Za-z.]*$/.test(w) || namePrefixes.test(w) || nameSuffixes.test(w);
+          });
+          if (validName) {
+            fields.name = nameCandidate.replace(/^(Mr|Mrs|Ms|Dr|Prof|Er|Sri|Shri|Smt|Kum)\.?\s+/i, '').trim();
+            markUsed(designationIdx - 1);
+          }
+        }
+      }
+    }
+    // Fallback: scan all lines
+    if (!fields.name) {
+      for (var i = 0; i < lines.length; i++) {
+        if (isUsedIdx(i)) continue;
+        var l = lines[i];
+        if (isExcluded(l)) continue;
+        if (l.match(/\d{3,}/)) continue;
+        if (l.match(/[@#:;]/)) continue;
+        if (l.match(/^[#\d]/)) continue;
+        if (l.indexOf('|') >= 0 || l.indexOf(' - ') >= 0) continue;
+        if (hasKeyword(l, companyKeywords)) continue;
+        if (hasKeyword(l, designationKeywords)) continue;
+        if (hasKeyword(l, departmentKeywords) && l.length < 30) continue;
+        var nameLine = l.replace(/^(Mr|Mrs|Ms|Dr|Prof|Er|Sri|Shri|Smt|Kum)\.?\s+/i, '').trim();
+        var words = nameLine.split(/\s+/);
+        if (words.length >= 2 && words.length <= 5) {
+          var allAlpha = words.every(function(w) {
+            return /^[A-Za-z.]+[-']?[A-Za-z.]*$/.test(w) || namePrefixes.test(w) || nameSuffixes.test(w);
+          });
+          if (allAlpha) {
+            var isTitleCase = words.every(function(w) {
+              return namePrefixes.test(w) || nameSuffixes.test(w) || /^[A-Z]/.test(w) || w.length <= 2;
+            });
+            if (isTitleCase) {
+              fields.name = nameLine;
+              markUsed(i); break;
+            }
+          }
         }
       }
     }
 
-    // === CITY RULE: Word-boundary match against Indian city list ===
-    var indianCities = ['Bengaluru','Bangalore','Mumbai','Delhi','New Delhi','Chennai','Hyderabad','Kolkata',
-      'Pune','Ahmedabad','Gurugram','Gurgaon','Noida','Kochi','Cochin','Coimbatore','Jaipur','Lucknow',
-      'Surat','Kanpur','Nagpur','Indore','Thane','Bhopal','Visakhapatnam','Vizag','Patna','Vadodara',
-      'Ghaziabad','Ludhiana','Agra','Nashik','Faridabad','Meerut','Rajkot','Varanasi','Srinagar',
-      'Aurangabad','Dhanbad','Amritsar','Allahabad','Ranchi','Howrah','Jabalpur','Gwalior',
-      'Vijayawada','Jodhpur','Raipur','Kota','Guwahati','Chandigarh','Mysuru','Mysore','Shimla','Bhubaneswar'];
-    var allTextForCity = lines.join(' ');
-    for (var j = 0; j < indianCities.length; j++) {
-      var cityRegex = new RegExp('\\b' + indianCities[j].replace(/\./g, '\\.') + '\\b', 'i');
-      if (cityRegex.test(allTextForCity)) { fields.city = indianCities[j]; break; }
+    // === PIN / ZIP CODE RULE ===
+    // India: 6 digits. Labels: PIN, PIN Code, ZIP, ZIP Code, Postal Code, Postcode, Pincode
+    // Distinguish from phone: 6 digits only, no + prefix, near address
+    // Also support US ZIP (5 digits or 5-4 format)
+    for (var i = 0; i < lines.length; i++) {
+      if (isUsedIdx(i)) continue;
+      if (isExcluded(lines[i])) continue;
+      // Labeled PIN: PIN: 560001, PIN Code: 560001
+      var pinLabel = lines[i].match(/^(?:PIN|PIN\s*Code|ZIP|ZIP\s*Code|Postal\s*Code|Postcode|Pincode)\s*[:\-]?\s*(\d{6})/i);
+      if (pinLabel) { fields.pincode = pinLabel[1]; markUsed(i); break; }
+      // US ZIP: ZIP: 12345 or 12345-6789
+      var zipLabel = lines[i].match(/^(?:ZIP|ZIP\s*Code|Postal\s*Code|Postcode)\s*[:\-]?\s*(\d{5}(?:-\d{4})?)/i);
+      if (zipLabel) { fields.pincode = zipLabel[1]; markUsed(i); break; }
+    }
+    // Unlabeled: look for 6-digit number in address-like context
+    if (!fields.pincode) {
+      for (var i = 0; i < lines.length; i++) {
+        if (isUsedIdx(i)) continue;
+        if (isExcluded(lines[i])) continue;
+        // 6-digit India PIN (not starting with 0,1,2,9 typically)
+        var pinM = lines[i].match(/\b([3-8]\d{5})\b/);
+        if (pinM && !lines[i].match(/@/) && !lines[i].match(/\+91/) && !isIdNumber(lines[i])) {
+          var fullDigits = lines[i].replace(/\D/g, '');
+          if (fullDigits.length <= 7) {
+            fields.pincode = pinM[1];
+            markUsed(i); break;
+          }
+        }
+        // US ZIP: 5 digits at end of address line
+        var zipM = lines[i].match(/\b(\d{5}(?:-\d{4})?)\b\s*$/);
+        if (zipM && !lines[i].match(/@/) && !lines[i].match(/\+91/) && !isIdNumber(lines[i])) {
+          var zd = zipM[1].replace(/\D/g,'');
+          if (zd.length === 5 || zd.length === 9) {
+            fields.pincode = zipM[1];
+            markUsed(i); break;
+          }
+        }
+      }
     }
 
-    // === COUNTRY RULE: Word-boundary match ===
+    // === ADDRESS RULE ===
+    // Combine related OCR lines into full address
+    // Labels: Address, Office, Registered Office, Branch, Corporate Office, Head Office, Works, Factory
+    // Patterns: Road, Street, Lane, Avenue, Industrial Area, Phase, Block, Building, Floor,
+    //   Suite, Unit, Plot, No, Sector, Nagar, Layout, Park, Estate, Complex
+    // Include city, state, PIN if found in address lines
+    var addressKeywords = ['Address','Office','Registered','Branch','Corporate','Head Office','Works','Factory',
+      'Road','Street','Lane','Avenue','Industrial Area','Phase','Block','Building','Floor',
+      'Suite','Unit','Plot','No.','Sector','Nagar','Layout','Park','Estate','Complex',
+      'Survey','Sy No','Door No','TC','SF','TF','GF','FF','MIDC','KIADB','GIDC'];
+    for (var i = 0; i < lines.length; i++) {
+      if (isUsedIdx(i)) continue;
+      if (isExcluded(lines[i])) continue;
+      var am = lines[i].match(/^(Address|Addr|Office|Registered|Branch|Corporate|Head|Works|Factory)\s*[:\-]?\s*(.+)/i);
+      if (am && am[2]) {
+        var addrParts = [am[2].trim()];
+        // Combine next 1-3 lines if they look like address continuation
+        for (var j = i+1; j < Math.min(i+4, lines.length); j++) {
+          if (isUsedIdx(j)) break;
+          if (isExcluded(lines[j])) break;
+          if (lines[j].length < 80 && !hasKeyword(lines[j], ['Pvt','Ltd','Technologies','Solutions','Industries'])) {
+            addrParts.push(lines[j].trim());
+            markUsed(j);
+          }
+        }
+        fields.address = addrParts.join(', ');
+        markUsed(i); break;
+      }
+      // Street patterns
+      if (/\b(No\.?\s*\d|\d+th\s+(Cross|Main|Stage|Block)|Sector\s+\d|Phase\s+[IVX\d]|Survey\s+No|Plot\s+No|Building|Floor|Suite|Unit|Industrial|Road|Street|Lane|Avenue|Nagar|Layout|Estate|Complex|MIDC|KIADB|GIDC)\b/i.test(lines[i]) && lines[i].length < 120) {
+        var addrParts2 = [lines[i]];
+        for (var j = i+1; j < Math.min(i+4, lines.length); j++) {
+          if (isUsedIdx(j)) break;
+          if (isExcluded(lines[j])) break;
+          if (lines[j].length < 80 && !hasKeyword(lines[j], ['Pvt','Ltd','Technologies','Solutions','Industries'])) {
+            addrParts2.push(lines[j].trim());
+            markUsed(j);
+          }
+        }
+        fields.address = addrParts2.join(', ');
+        markUsed(i); break;
+      }
+    }
+
+    // === CITY RULE ===
+    // Detect known city names, alternate spellings
+    // Use address context, country context
+    var cityMap = {
+      'Bengaluru':'Bengaluru','Bangalore':'Bengaluru','Mumbai':'Mumbai','Bombay':'Mumbai',
+      'Delhi':'Delhi','New Delhi':'Delhi','Chennai':'Chennai','Madras':'Chennai',
+      'Hyderabad':'Hyderabad','Kolkata':'Kolkata','Calcutta':'Kolkata',
+      'Pune':'Pune','Ahmedabad':'Ahmedabad','Gurugram':'Gurugram','Gurgaon':'Gurugram',
+      'Noida':'Noida','Greater Noida':'Noida','Kochi':'Kochi','Cochin':'Kochi',
+      'Coimbatore':'Coimbatore','Jaipur':'Jaipur','Lucknow':'Lucknow','Surat':'Surat',
+      'Kanpur':'Kanpur','Nagpur':'Nagpur','Indore':'Indore','Thane':'Thane',
+      'Bhopal':'Bhopal','Visakhapatnam':'Visakhapatnam','Vizag':'Visakhapatnam',
+      'Patna':'Patna','Vadodara':'Vadodara','Baroda':'Vadodara','Ghaziabad':'Ghaziabad',
+      'Ludhiana':'Ludhiana','Agra':'Agra','Nashik':'Nashik','Faridabad':'Faridabad',
+      'Meerut':'Meerut','Rajkot':'Rajkot','Varanasi':'Varanasi','Srinagar':'Srinagar',
+      'Aurangabad':'Aurangabad','Dhanbad':'Dhanbad','Amritsar':'Amritsar',
+      'Allahabad':'Allahabad','Ranchi':'Ranchi','Howrah':'Howrah','Jabalpur':'Jabalpur',
+      'Gwalior':'Gwalior','Vijayawada':'Vijayawada','Jodhpur':'Jodhpur',
+      'Raipur':'Raipur','Kota':'Kota','Guwahati':'Guwahati','Chandigarh':'Chandigarh',
+      'Mysuru':'Mysuru','Mysore':'Mysuru','Shimla':'Shimla','Bhubaneswar':'Bhubaneswar',
+      ' Mangalore':'Mangaluru','Mangaluru':'Mangaluru','Belgaum':'Belagavi','Belagavi':'Belagavi',
+      'Hubli':'Hubballi','Hubballi':'Hubballi','Gulbarga':'Kalaburagi','Kalaburagi':'Kalaburagi',
+      'Mangaluru':'Mangaluru','Trivandrum':'Thiruvananthapuram','Thiruvananthapuram':'Thiruvananthapuram',
+      'Cochin':'Kochi','Kozhikode':'Kozhikode','Calicut':'Kozhikode','Trichy':'Tiruchirappalli',
+      'Tiruchirappalli':'Tiruchirappalli','Madurai':'Madurai','Salem':'Salem','Erode':'Erode',
+      'Tirunelveli':'Tirunelveli','Vellore':'Vellore','Thoothukudi':'Thoothukudi','Tuticorin':'Thoothukudi',
+      'Udaipur':'Udaipur','Ajmer':'Ajmer','Bikaner':'Bikaner','Jaisalmer':'Jaisalmer',
+      'Dehradun':'Dehradun','Haridwar':'Haridwar','Roorkee':'Roorkee',
+      'Siliguri':'Siliguri','Durgapur':'Durgapur','Asansol':'Asansol','Kharagpur':'Kharagpur',
+      'Durg':'Durg','Bhilai':'Bhilai','Raigarh':'Raigarh','Bilaspur':'Bilaspur',
+      'Jamshedpur':'Jamshedpur','Durgabhilai':'Durgabhilai','Warangal':'Warangal',
+      'Karimnagar':'Karimnagar','Nizamabad':'Nizamabad','Khammam':'Khammam',
+      'Tirupati':'Tirupati','Nellore':'Nellore','Kurnool':'Kurnool','Kakinada':'Kakinada',
+      'Solapur':'Solapur','Kolhapur':'Kolhapur','Amravati':'Amravati','Sangli':'Sangli',
+      'Jalgaon':'Jalgaon','Latur':'Latur','Nanded':'Nanded','Ahmednagar':'Ahmednagar',
+      'Bharuch':'Bharuch','Anand':'Anand','Nadiad':'Nadiad','Mehsana':'Mehsana',
+      'Bhavnagar':'Bhavnagar','Jamnagar':'Jamnagar','Junagadh':'Junagadh','Gandhinagar':'Gandhinagar',
+      'Morbi':'Morbi','Surendranagar':'Surendranagar','Vapi':'Vapi','Valsad':'Valsad',
+      'Navsari':'Navsari','Bhuj':'Bhuj','Gandhidham':'Gandhidham','Ankleshwar':'Ankleshwar',
+      'Panipat':'Panipat','Ambala':'Ambala','Karnal':'Karnal','Hisar':'Hisar',
+      'Yamunanagar':'Yamunanagar','Rohtak':'Rohtak','Rewari':'Rewari','Panchkula':'Panchkula'
+    };
+    var allTextForCity = lines.join(' ');
+    for (var city in cityMap) {
+      var cityRegex = new RegExp('\\b' + city.replace(/\./g, '\\.').replace(/\s/g, '\\s+') + '\\b', 'i');
+      if (cityRegex.test(allTextForCity)) {
+        fields.city = cityMap[city];
+        break;
+      }
+    }
+    // Also check near PIN code
+    if (!fields.city && fields.pincode) {
+      // Known PIN prefix to city mapping (major cities)
+      var pinCityMap = {
+        '560':'Bengaluru','561':'Bengaluru','562':'Bengaluru','110':'Delhi','400':'Mumbai',
+        '600':'Chennai','500':'Hyderabad','700':'Kolkata','411':'Pune','380':'Ahmedabad',
+        '122':'Gurugram','201':'Noida','682':'Kochi','641':'Coimbatore','302':'Jaipur',
+        '226':'Lucknow','395':'Surat','208':'Kanpur','440':'Nagpur','452':'Indore',
+        '4006':'Thane','462':'Bhopal','530':'Visakhapatnam','800':'Patna','390':'Vadodara',
+        '141':'Ludhiana','282':'Agra','422':'Nashik','121':'Faridabad','250':'Meerut',
+        '360':'Rajkot','221':'Varanasi','560':'Bengaluru','570':'Mysuru'
+      };
+      var pinPrefix = fields.pincode.substring(0, 3);
+      if (pinCityMap[pinPrefix]) fields.city = pinCityMap[pinPrefix];
+    }
+
+    // === STATE RULE ===
+    var stateList = ['Karnataka','Maharashtra','Tamil Nadu','Kerala','Telangana','Andhra Pradesh',
+      'Gujarat','Delhi','Haryana','Punjab','Rajasthan','Uttar Pradesh','Madhya Pradesh',
+      'West Bengal','Bihar','Jharkhand','Odisha','Assam','Goa','Uttarakhand','Himachal Pradesh',
+      'Jammu and Kashmir','Chhattisgarh','Puducherry','Chandigarh','Tripura','Manipur',
+      'Meghalaya','Nagaland','Sikkim','Mizoram','Arunachal Pradesh'];
+    var stateAbbr = { 'KA':'Karnataka','MH':'Maharashtra','TN':'Tamil Nadu','KL':'Kerala',
+      'TS':'Telangana','AP':'Andhra Pradesh','GJ':'Gujarat','DL':'Delhi','HR':'Haryana',
+      'PB':'Punjab','RJ':'Rajasthan','UP':'Uttar Pradesh','MP':'Madhya Pradesh',
+      'WB':'West Bengal','BR':'Bihar','JH':'Jharkhand','OD':'Odisha','OR':'Odisha',
+      'AS':'Assam','GA':'Goa','UK':'Uttarakhand','HP':'Himachal Pradesh',
+      'JK':'Jammu and Kashmir','CG':'Chhattisgarh','PY':'Puducherry',
+      'CH':'Chandigarh','TR':'Tripura','MN':'Manipur','ML':'Meghalaya',
+      'NL':'Nagaland','SK':'Sikkim','MZ':'Mizoram','AR':'Arunachal Pradesh' };
+    for (var s = 0; s < stateList.length; s++) {
+      if (new RegExp('\\b' + stateList[s].replace(/\s/g, '\\s+') + '\\b', 'i').test(allTextForCity)) {
+        fields.state = stateList[s]; break;
+      }
+    }
+    if (!fields.state) {
+      // Check for "State:" label
+      var stateLabel = allTextForCity.match(/(?:State)\s*[:\-]\s*([A-Za-z\s]+)/i);
+      if (stateLabel && stateLabel[1]) {
+        fields.state = stateLabel[1].trim().substring(0, 40);
+      }
+    }
+    if (!fields.state) {
+      for (var abbr in stateAbbr) {
+        if (new RegExp('\\b' + abbr + '\\b').test(allTextForCity)) {
+          fields.state = stateAbbr[abbr]; break;
+        }
+      }
+    }
+    // Derive state from city
+    if (!fields.state && fields.city) {
+      var cityStateMap = {
+        'Bengaluru':'Karnataka','Mumbai':'Maharashtra','Delhi':'Delhi','Chennai':'Tamil Nadu',
+        'Hyderabad':'Telangana','Kolkata':'West Bengal','Pune':'Maharashtra',
+        'Ahmedabad':'Gujarat','Gurugram':'Haryana','Noida':'Uttar Pradesh',
+        'Kochi':'Kerala','Coimbatore':'Tamil Nadu','Jaipur':'Rajasthan',
+        'Lucknow':'Uttar Pradesh','Surat':'Gujarat','Kanpur':'Uttar Pradesh',
+        'Nagpur':'Maharashtra','Indore':'Madhya Pradesh','Thane':'Maharashtra',
+        'Bhopal':'Madhya Pradesh','Visakhapatnam':'Andhra Pradesh','Patna':'Bihar',
+        'Vadodara':'Gujarat','Ghaziabad':'Uttar Pradesh','Ludhiana':'Punjab',
+        'Mysuru':'Karnataka','Chandigarh':'Chandigarh','Guwahati':'Assam'
+      };
+      if (cityStateMap[fields.city]) fields.state = cityStateMap[fields.city];
+    }
+
+    // === COUNTRY RULE ===
     if (/\bindia\b/i.test(allTextForCity)) {
       fields.country = 'India';
     } else {
-      var countries = ['USA','United States','UK','United Kingdom','Singapore','Germany','China','Japan',
-        'UAE','Dubai','Australia','Canada','France','Italy','South Korea','Taiwan','Hong Kong'];
-      for (var i = 0; i < countries.length; i++) {
-        if (new RegExp('\\b' + countries[i].replace(/\./g, '\\.') + '\\b', 'i').test(allTextForCity)) {
-          fields.country = countries[i]; break;
+      var countries = { 'USA':'USA','United States':'USA','United States of America':'USA','US':'USA',
+        'UK':'UK','United Kingdom':'UK','Britain':'UK','Great Britain':'UK',
+        'Singapore':'Singapore','Germany':'Germany','Deutschland':'Germany',
+        'China':'China','Japan':'Japan','Nippon':'Japan',
+        'UAE':'UAE','United Arab Emirates':'UAE','Dubai':'UAE','Abu Dhabi':'UAE',
+        'Australia':'Australia','Canada':'Canada','France':'France',
+        'Italy':'Italy','Italia':'Italy','South Korea':'South Korea','Korea':'South Korea',
+        'Taiwan':'Taiwan','Hong Kong':'Hong Kong','Thailand':'Thailand',
+        'Malaysia':'Malaysia','Indonesia':'Indonesia','Vietnam':'Vietnam',
+        'Switzerland':'Switzerland','Netherlands':'Netherlands','Sweden':'Sweden',
+        'Spain':'Spain','Belgium':'Belgium','Austria':'Austria',
+        'Brazil':'Brazil','Mexico':'Mexico','Russia':'Russia','Turkey':'Turkey',
+        'Saudi Arabia':'Saudi Arabia','Qatar':'Qatar','Oman':'Oman',
+        'Bahrain':'Bahrain','Kuwait':'Kuwait','Egypt':'Egypt','South Africa':'South Africa',
+        'Nigeria':'Nigeria','Kenya':'Kenya','Israel':'Israel','Poland':'Poland' };
+      for (var country in countries) {
+        if (new RegExp('\\b' + country.replace(/\./g, '\\.') + '\\b', 'i').test(allTextForCity)) {
+          fields.country = countries[country]; break;
         }
+      }
+      // Try country code from phone
+      if (!fields.country && fields.phone) {
+        var phoneDigits = fields.phone.replace(/\D/g, '');
+        if (phoneDigits.indexOf('91') === 0 && phoneDigits.length >= 12) fields.country = 'India';
+        else if (phoneDigits.indexOf('1') === 0 && phoneDigits.length === 11) fields.country = 'USA';
+        else if (phoneDigits.indexOf('44') === 0 && phoneDigits.length >= 12) fields.country = 'UK';
+        else if (phoneDigits.indexOf('65') === 0 && phoneDigits.length >= 10) fields.country = 'Singapore';
+        else if (phoneDigits.indexOf('49') === 0 && phoneDigits.length >= 12) fields.country = 'Germany';
+        else if (phoneDigits.indexOf('86') === 0 && phoneDigits.length >= 13) fields.country = 'China';
+        else if (phoneDigits.indexOf('81') === 0 && phoneDigits.length >= 12) fields.country = 'Japan';
+        else if (phoneDigits.indexOf('971') === 0 && phoneDigits.length >= 12) fields.country = 'UAE';
+        else if (phoneDigits.indexOf('61') === 0 && phoneDigits.length >= 11) fields.country = 'Australia';
+        else if (phoneDigits.indexOf('91') === 0) fields.country = 'India';
       }
     }
 
@@ -1898,6 +2497,24 @@ const CardScanner = {
     var now = new Date();
     var captureDate = now.toISOString().slice(0,10) + ' ' + now.toTimeString().slice(0,8);
     this.lastRawOCR = rawText;
+    this.pendingFields = fields;
+    this.pendingRawText = rawText;
+    this.pendingCaptureDate = captureDate;
+
+    // Ask if user wants to scan the back side of the card
+    if (confirm('Front side scanned! Do you want to scan the BACK SIDE of the card?\n\nTap OK to scan back side, or Cancel to finish with current data.')) {
+      // User wants to scan back side
+      this.isBackSide = true;
+      // Trigger file input again
+      var input = document.getElementById('cardScanInput');
+      if (input) input.click();
+    } else {
+      // User is done — go to form
+      this.finalizeCardScan(fields, rawText, captureDate);
+    }
+  },
+
+  finalizeCardScan(fields, rawText, captureDate) {
     ManualForm.currentScanData = {
       raw: '[Visiting Card OCR] ' + rawText.substring(0, 500),
       fields: fields,
@@ -1907,7 +2524,6 @@ const CardScanner = {
     App.navigate('manual');
     App.toggleDrawer(false);
 
-    // Show a toast about what was extracted
     var extracted = [];
     if (fields.name) extracted.push('Name');
     if (fields.company) extracted.push('Company');
@@ -1951,10 +2567,9 @@ const ManualForm = {
       <div class="form-card">
         <h3>📋 Visitor Information</h3>
         <div class="form-group"><label>Visitor Name *</label><input type="text" id="f_name" value="${esc(data.name||'')}" placeholder="Full name"></div>
-        <div class="field-row">
-          <div class="form-group"><label>Company *</label><input type="text" id="f_company" value="${esc(data.company||'')}" placeholder="Company name"></div>
-          <div class="form-group"><label>Designation</label><input type="text" id="f_designation" value="${esc(data.designation||'')}" placeholder="Job title"></div>
-        </div>
+        <div class="form-group"><label>Designation</label><input type="text" id="f_designation" value="${esc(data.designation||'')}" placeholder="Job title"></div>
+        <div class="form-group"><label>Department</label><input type="text" id="f_department" value="${esc(data.department||'')}" placeholder="Department"></div>
+        <div class="form-group"><label>Company *</label><input type="text" id="f_company" value="${esc(data.company||'')}" placeholder="Company name"></div>
         <div class="form-group">
           <label>Mobile / Phone</label>
           <input type="tel" id="f_phone" value="${esc(data.phone||'')}" placeholder="+91...">
@@ -1969,6 +2584,11 @@ const ManualForm = {
           <div class="form-group"><label>Country</label><input type="text" id="f_country" value="${esc(data.country||'India')}" placeholder="Country"></div>
           <div class="form-group"><label>City</label><input type="text" id="f_city" value="${esc(data.city||'')}" placeholder="City"></div>
         </div>
+        <div class="field-row">
+          <div class="form-group"><label>State</label><input type="text" id="f_state" value="${esc(data.state||'')}" placeholder="State"></div>
+          <div class="form-group"><label>PIN / ZIP</label><input type="text" id="f_pincode" value="${esc(data.pincode||'')}" placeholder="PIN code"></div>
+        </div>
+        <div class="form-group"><label>Address</label><input type="text" id="f_address" value="${esc(data.address||'')}" placeholder="Street address"></div>
         <div class="form-group"><label>Badge ID</label><input type="text" id="f_badgeId" value="${esc(data.badgeId||'')}" placeholder="Badge ID"></div>
         <div class="field-row">
           <div class="form-group">
@@ -1989,7 +2609,7 @@ const ManualForm = {
         <div class="form-group">
           <label>Visitor Type</label>
           <select id="f_visitorType">
-            ${['Visitor','VIP','Exhibitor','Press','Delegate','Speaker','Other'].map(t => `<option ${data.visitorType===t?'selected':''}>${t}</option>`).join('')}
+            ${(App.getDropdownOptions('visitorTypes') || DEFAULT_VISITOR_TYPES).map(t => `<option ${data.visitorType===t?'selected':''}>${t}</option>`).join('')}
           </select>
         </div>
         ${raw ? `
@@ -2038,14 +2658,14 @@ const ManualForm = {
           <label>Requirement Volume</label>
           <select id="f_volume">
             <option value="">Select volume...</option>
-            ${DEFAULT_VOLUMES.map(v => `<option ${data.volume===v?'selected':''}>${v}</option>`).join('')}
+            ${(App.getDropdownOptions('volumes') || DEFAULT_VOLUMES).map(v => `<option ${data.volume===v?'selected':''}>${v}</option>`).join('')}
           </select>
         </div>
         <div class="form-group">
           <label>Timeline</label>
           <select id="f_timeline">
             <option value="">Select timeline...</option>
-            ${DEFAULT_TIMELINES.map(t => `<option ${data.timeline===t?'selected':''}>${t}</option>`).join('')}
+            ${(App.getDropdownOptions('timelines') || DEFAULT_TIMELINES).map(t => `<option ${data.timeline===t?'selected':''}>${t}</option>`).join('')}
           </select>
         </div>
         <div class="form-group">
@@ -2070,7 +2690,7 @@ const ManualForm = {
             <label>Follow-up Type</label>
             <select id="f_followUpType">
               <option value="">Select...</option>
-              ${FOLLOWUP_TYPES.map(t => `<option ${data.followUpType===t?'selected':''}>${t}</option>`).join('')}
+              ${(App.getDropdownOptions('followUpTypes') || FOLLOWUP_TYPES).map(t => `<option ${data.followUpType===t?'selected':''}>${t}</option>`).join('')}
             </select>
           </div>
         </div>
@@ -2078,7 +2698,7 @@ const ManualForm = {
           <label>Follow-up Status</label>
           <select id="f_followUpStatus">
             <option value="">Select...</option>
-            ${['Pending','In Progress','Completed','Cancelled'].map(s => `<option ${data.followUpStatus===s?'selected':''}>${s}</option>`).join('')}
+            ${(App.getDropdownOptions('followUpStatuses') || DEFAULT_FOLLOWUP_STATUSES).map(s => `<option ${data.followUpStatus===s?'selected':''}>${s}</option>`).join('')}
           </select>
         </div>
         <div class="form-group">
@@ -2252,6 +2872,7 @@ const ManualForm = {
     const leadData = {
       name, company,
       designation: val('f_designation'),
+      department: val('f_department'),
       phone: val('f_phone'),
       phone2: val('f_phone2'),
       phone3: val('f_phone3'),
@@ -2260,6 +2881,9 @@ const ManualForm = {
       email: val('f_email'),
       country: val('f_country'),
       city: val('f_city'),
+      state: val('f_state'),
+      pincode: val('f_pincode'),
+      address: val('f_address'),
       badgeId: val('f_badgeId'),
       linkedin: val('f_linkedin'),
       website: val('f_website'),
@@ -2454,7 +3078,7 @@ const Leads = {
           <div class="detail-avatar">${esc(lead.name.charAt(0).toUpperCase())}</div>
           <div style="flex:1">
             <h3>${esc(lead.name)}</h3>
-            <p>${esc(lead.company)}${lead.designation ? ' · ' + esc(lead.designation) : ''}</p>
+            <p>${esc(lead.company)}${lead.designation ? ' · ' + esc(lead.designation) : ''}${lead.department ? ' · ' + esc(lead.department) : ''}</p>
           </div>
           ${lead.priority ? `<span class="lead-tag" style="background:${lead.priority==='Hot'?'#f8d7da':lead.priority==='Warm'?'#fff3cd':'#cfe2ff'};color:${lead.priority==='Hot'?'#dc3545':lead.priority==='Warm'?'#fd7e14':'#0d6efd'};font-size:13px;padding:4px 12px">${lead.priority}</span>` : ''}
         </div>
@@ -2479,6 +3103,9 @@ const Leads = {
         ${lead.email ? `<div class="detail-row"><span class="dr-label">Email</span><span class="dr-value">${esc(lead.email)}</span></div>` : ''}
         ${lead.country ? `<div class="detail-row"><span class="dr-label">Country</span><span class="dr-value">${esc(lead.country)}</span></div>` : ''}
         ${lead.city ? `<div class="detail-row"><span class="dr-label">City</span><span class="dr-value">${esc(lead.city)}</span></div>` : ''}
+        ${lead.state ? `<div class="detail-row"><span class="dr-label">State</span><span class="dr-value">${esc(lead.state)}</span></div>` : ''}
+        ${lead.pincode ? `<div class="detail-row"><span class="dr-label">PIN/ZIP</span><span class="dr-value">${esc(lead.pincode)}</span></div>` : ''}
+        ${lead.address ? `<div class="detail-row"><span class="dr-label">Address</span><span class="dr-value">${esc(lead.address)}</span></div>` : ''}
         ${lead.badgeId ? `<div class="detail-row"><span class="dr-label">Badge ID</span><span class="dr-value">${esc(lead.badgeId)}</span></div>` : ''}
         ${lead.linkedin ? `<div class="detail-row"><span class="dr-label">LinkedIn</span><span class="dr-value">${esc(lead.linkedin)}</span></div>` : ''}
         ${lead.website ? `<div class="detail-row"><span class="dr-label">Website</span><span class="dr-value">${esc(lead.website)}</span></div>` : ''}
@@ -2738,14 +3365,14 @@ const Export = {
     const leads = await this.getFiltered();
     if (leads.length === 0) { App.toast('No leads to export with current filters', 'error'); return; }
 
-    const headers = ['Lead ID','Date','Time','Salesperson','Event','Visitor Name','Company','Designation','Mobile','Mobile 2','Mobile 3','Mobile 4','Mobile 5','Email','Country','City','Badge ID','LinkedIn','Website','Raw Badge Data','Raw OCR Data','Date of Capture','Visitor Type','Lead Source','Priority','Interest','Volume','Timeline','Customer Requirement','Follow-up','Follow-up Date','Follow-up Type','Follow-up Status','Remarks','Created At','Updated At','Synced At','Sync Status'];
+    const headers = ['Lead ID','Date','Time','Salesperson','Event','Visitor Name','Designation','Department','Company','Mobile','Mobile 2','Mobile 3','Mobile 4','Mobile 5','Email','Country','City','State','PIN/ZIP','Address','Badge ID','LinkedIn','Website','Raw Badge Data','Raw OCR Data','Date of Capture','Visitor Type','Lead Source','Priority','Interest','Volume','Timeline','Customer Requirement','Follow-up','Follow-up Date','Follow-up Type','Follow-up Status','Remarks','Created At','Updated At','Synced At','Sync Status'];
 
     const rows = leads.map(l => [
       l.id||'', l.date||'', l.time||'', l.salesperson||'',
       l.eventName||'',
-      l.name||'', l.company||'', l.designation||'',
+      l.name||'', l.designation||'', l.department||'', l.company||'',
       l.phone||'', l.phone2||'', l.phone3||'', l.phone4||'', l.phone5||'',
-      l.email||'', l.country||'', l.city||'',
+      l.email||'', l.country||'', l.city||'', l.state||'', l.pincode||'', l.address||'',
       l.badgeId||'', l.linkedin||'', l.website||'', l.rawBadgeData||'',
       l.rawOcrData||'', l.captureDate||'',
       l.visitorType||'',
@@ -3170,6 +3797,34 @@ const Admin = {
     document.getElementById('setLeadSource').value = App.settings.leadSource || '';
     var ocrEl = document.getElementById('setOcrKey');
     if (ocrEl) ocrEl.value = App.settings.ocrApiKey || '';
+    // Load dropdown options
+    var dd = App.settings.dropdownOptions || {};
+    var vtEl = document.getElementById('setVisitorTypes');
+    if (vtEl) vtEl.value = dd.visitorTypes || DEFAULT_VISITOR_TYPES.join('\n');
+    var prEl = document.getElementById('setPriorities');
+    if (prEl) prEl.value = dd.priorities || DEFAULT_PRIORITIES.join('\n');
+    var voEl = document.getElementById('setVolumes');
+    if (voEl) voEl.value = dd.volumes || DEFAULT_VOLUMES.join('\n');
+    var tlEl = document.getElementById('setTimelines');
+    if (tlEl) tlEl.value = dd.timelines || DEFAULT_TIMELINES.join('\n');
+    var futEl = document.getElementById('setFollowUpTypes');
+    if (futEl) futEl.value = dd.followUpTypes || DEFAULT_FOLLOWUP_TYPES.join('\n');
+    var fusEl = document.getElementById('setFollowUpStatuses');
+    if (fusEl) fusEl.value = dd.followUpStatuses || DEFAULT_FOLLOWUP_STATUSES.join('\n');
+  },
+
+  async saveDropdownOptions() {
+    App.settings.dropdownOptions = {
+      visitorTypes: document.getElementById('setVisitorTypes').value,
+      priorities: document.getElementById('setPriorities').value,
+      volumes: document.getElementById('setVolumes').value,
+      timelines: document.getElementById('setTimelines').value,
+      followUpTypes: document.getElementById('setFollowUpTypes').value,
+      followUpStatuses: document.getElementById('setFollowUpStatuses').value
+    };
+    await dbPut('settings', { key: 'app', value: App.settings });
+    App.toast('Dropdown options saved', 'success');
+    Cloud.syncUpAdmin();
   },
 
   async saveSettings() {
@@ -3204,8 +3859,6 @@ document.getElementById('modalOverlay').addEventListener('click', (e) => {
 // Enter key on login
 var lpEl = document.getElementById('loginPass');
 if (lpEl) lpEl.addEventListener('keydown', function(e) { if (e.key === 'Enter') App.doLogin(); });
-var lapEl = document.getElementById('loginAdminPass');
-if (lapEl) lapEl.addEventListener('keydown', function(e) { if (e.key === 'Enter') App.doAdminLogin(); });
 
 // Initialize app on load
 window.addEventListener('DOMContentLoaded', () => App.init());
