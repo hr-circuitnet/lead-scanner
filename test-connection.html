@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Supabase Connection Test</title>
+<style>
+body{font-family:system-ui,sans-serif;padding:20px;max-width:600px;margin:0 auto}
+button{padding:12px 24px;font-size:16px;background:#0d6efd;color:#fff;border:none;border-radius:8px;cursor:pointer;margin:5px 0}
+button:hover{background:#0a58ca}
+pre{background:#f4f4f4;padding:12px;border-radius:8px;overflow-x:auto;font-size:13px;white-space:pre-wrap;word-break:break-all}
+.ok{color:#198754;font-weight:bold}
+.fail{color:#dc3545;font-weight:bold}
+</style>
+</head>
+<body>
+<h2>Supabase Connection Test</h2>
+<p>This page tests your Supabase database connection.</p>
+
+<button onclick="testFetch()">Test Connection</button>
+<button onclick="testInsert()">Test Insert Lead</button>
+
+<h3>Results:</h3>
+<pre id="output">Click a button above to start testing...</pre>
+
+<script>
+const URL = 'https://iposzbpoacvqecggdwyy.supabase.co/rest/v1';
+const KEY = 'sb_publishable_l7pVRY9SDCA-eroiow8zNA_kPBPKT3o';
+
+function log(msg) {
+  document.getElementById('output').textContent += '\n' + msg;
+}
+
+function clearLog() {
+  document.getElementById('output').textContent = '';
+}
+
+async function testFetch() {
+  clearLog();
+  log('=== Testing GET users (apikey only) ===');
+  try {
+    var resp = await fetch(URL + '/users?select=id,name&limit=3', {
+      headers: { 'apikey': KEY, 'Content-Type': 'application/json' }
+    });
+    log('Status: ' + resp.status + ' ' + resp.statusText);
+    var body = await resp.text();
+    log('Body: ' + body);
+    if (resp.ok) log('\n✅ GET works with apikey only!');
+  } catch (e) {
+    log('❌ Error: ' + e.message);
+  }
+
+  log('\n=== Testing GET users (apikey + Authorization) ===');
+  try {
+    var resp2 = await fetch(URL + '/users?select=id,name&limit=3', {
+      headers: { 'apikey': KEY, 'Authorization': 'Bearer ' + KEY, 'Content-Type': 'application/json' }
+    });
+    log('Status: ' + resp2.status + ' ' + resp2.statusText);
+    var body2 = await resp2.text();
+    log('Body: ' + body2);
+    if (resp2.ok) log('\n✅ GET works with Authorization header!');
+  } catch (e) {
+    log('❌ Error: ' + e.message);
+  }
+
+  log('\n=== Testing GET leads ===');
+  try {
+    var resp3 = await fetch(URL + '/leads?select=id,name&limit=3', {
+      headers: { 'apikey': KEY, 'Content-Type': 'application/json' }
+    });
+    log('Status: ' + resp3.status + ' ' + resp3.statusText);
+    var body3 = await resp3.text();
+    log('Body: ' + body3);
+    if (resp3.ok) log('\n✅ GET leads works!');
+  } catch (e) {
+    log('❌ Error: ' + e.message);
+  }
+}
+
+async function testInsert() {
+  clearLog();
+  log('=== Testing POST insert lead ===');
+  var testLead = {
+    id: 'test-' + Date.now(),
+    name: 'Test Lead',
+    company: 'Test Company',
+    syncStatus: 'Synced',
+    deleted: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  log('Sending: ' + JSON.stringify(testLead));
+  
+  // Test 1: apikey only
+  log('\n--- Test with apikey only ---');
+  try {
+    var resp = await fetch(URL + '/leads?on_conflict=id', {
+      method: 'POST',
+      headers: { 'apikey': KEY, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates' },
+      body: JSON.stringify(testLead)
+    });
+    log('Status: ' + resp.status + ' ' + resp.statusText);
+    var body = await resp.text();
+    log('Body: ' + body);
+    if (resp.ok) log('✅ INSERT works with apikey only!');
+  } catch (e) {
+    log('❌ Error: ' + e.message);
+  }
+
+  // Test 2: apikey + Authorization
+  log('\n--- Test with apikey + Authorization ---');
+  try {
+    var resp2 = await fetch(URL + '/leads?on_conflict=id', {
+      method: 'POST',
+      headers: { 'apikey': KEY, 'Authorization': 'Bearer ' + KEY, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates' },
+      body: JSON.stringify(testLead)
+    });
+    log('Status: ' + resp2.status + ' ' + resp2.statusText);
+    var body2 = await resp2.text();
+    log('Body: ' + body2);
+    if (resp2.ok) log('✅ INSERT works with Authorization header!');
+  } catch (e) {
+    log('❌ Error: ' + e.message);
+  }
+
+  // Cleanup
+  log('\n--- Cleaning up test lead ---');
+  try {
+    var resp3 = await fetch(URL + '/leads?id=eq.' + testLead.id, {
+      method: 'DELETE',
+      headers: { 'apikey': KEY, 'Authorization': 'Bearer ' + KEY }
+    });
+    log('Delete status: ' + resp3.status);
+  } catch (e) {
+    log('Cleanup error: ' + e.message);
+  }
+}
+</script>
+</body>
+</html>

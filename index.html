@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0d6efd">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="dark">
+<meta name="apple-mobile-web-app-title" content="CircuitNet">
+<title>CircuitNet Expo Lead Scanner</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<style>
+:root{
+  --primary:#0d6efd;--primary-dark:#0a58ca;--primary-light:#3d8bff;
+  --bg:#f0f4f8;--card:#fff;--text:#1a2744;--text-muted:#6c7a92;
+  --border:#e2e8f0;--success:#198754;--success-light:#d1e7dd;
+  --warning:#fd7e14;--warning-light:#fff3cd;--danger:#dc3545;--danger-light:#f8d7da;
+  --dark:#0a1628;--dark2:#13284a;--radius:14px;
+  --hot:#dc3545;--warm:#fd7e14;--cold:#0d6efd;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;overflow-x:hidden}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background:var(--bg);color:var(--text);font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}
+button{font-family:inherit;cursor:pointer;border:none;outline:none}
+input,select,textarea{font-family:inherit;font-size:15px;outline:none}
+a{text-decoration:none;color:inherit}
+
+/* ===== LOGIN ===== */
+#loginScreen{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;background:linear-gradient(135deg,#0a1628 0%,#13284a 50%,#0d6efd 100%);padding:20px}
+.login-card{background:#fff;border-radius:20px;padding:35px 28px;width:100%;max-width:380px;box-shadow:0 20px 60px rgba(0,0,0,.3)}
+.login-logo{text-align:center;margin-bottom:25px}
+.login-logo .cn-badge{display:inline-flex;align-items:center;justify-content:center;width:72px;height:72px;border-radius:18px;background:linear-gradient(135deg,#0d6efd,#0a58ca);color:#fff;font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:12px;box-shadow:0 8px 24px rgba(13,110,253,.4)}
+.login-logo h1{font-size:19px;font-weight:700;color:var(--text)}
+.login-logo .subtitle{font-size:13px;color:var(--text-muted);margin-top:4px}
+.login-logo .expo-tag{display:inline-block;margin-top:10px;padding:4px 12px;background:var(--primary-light);color:#fff;border-radius:20px;font-size:11px;font-weight:600;letter-spacing:.5px}
+.form-group{margin-bottom:16px}
+.form-group label{display:block;font-size:13px;font-weight:600;color:var(--text);margin-bottom:6px}
+.form-group input,.form-group select,.form-group textarea{width:100%;padding:13px 14px;border:2px solid var(--border);border-radius:10px;font-size:15px;color:var(--text);transition:border .2s}
+.form-group input:focus,.form-group select:focus,.form-group textarea:focus{border-color:var(--primary)}
+.form-group select{appearance:none;background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236c7a92' d='M6 8L2 4h8z'/%3E%3C/svg%3E") no-repeat right 14px center;padding-right:36px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:14px 20px;border-radius:12px;font-size:15px;font-weight:600;transition:.15s}
+.btn-primary{background:var(--primary);color:#fff;width:100%}
+.btn-primary:active{background:var(--primary-dark)}
+.btn-large{padding:18px 24px;font-size:17px;border-radius:14px}
+.btn-success{background:var(--success);color:#fff}
+.btn-outline{background:#fff;border:2px solid var(--border);color:var(--text)}
+.btn-outline:active{border-color:var(--primary);color:var(--primary)}
+.btn-danger{background:var(--danger);color:#fff}
+.btn-warning{background:var(--warning);color:#fff}
+.login-error{color:var(--danger);font-size:13px;text-align:center;margin-top:10px;min-height:18px}
+.login-footer{text-align:center;margin-top:16px;font-size:12px;color:var(--text-muted)}
+
+/* ===== APP LAYOUT ===== */
+#appScreen{display:none;min-height:100vh}
+.app-header{position:sticky;top:0;z-index:100;background:linear-gradient(135deg,#0a1628,#13284a);color:#fff;padding:0 12px;display:flex;align-items:center;justify-content:space-between;height:52px;box-shadow:0 2px 8px rgba(0,0,0,.15)}
+.app-header .hdr-left{display:flex;align-items:center;gap:8px}
+.app-header .menu-btn{background:none;color:#fff;font-size:22px;padding:6px;line-height:1}
+.app-header .hdr-center{display:flex;align-items:center;justify-content:center;flex:1}
+.app-header .hdr-center img{height:30px;width:auto;filter:brightness(0) invert(1);-webkit-filter:brightness(0) invert(1)}
+.app-header .hdr-right{display:flex;align-items:center;gap:8px}
+.app-subbar{background:#0d6efd;color:#fff;text-align:center;font-size:11px;font-weight:700;letter-spacing:1.5px;padding:3px 0;text-transform:uppercase}
+.sync-badge{display:flex;align-items:center;gap:5px;font-size:12px;padding:4px 10px;border-radius:20px;font-weight:600}
+.sync-online{background:rgba(25,135,84,.25);color:#6ee7a7}
+.sync-offline{background:rgba(253,126,20,.25);color:#fdba74}
+.app-header .user-chip{display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer}
+.app-header .user-avatar{width:30px;height:30px;border-radius:50%;background:var(--primary);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
+
+/* Side drawer */
+.drawer-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:200}
+.drawer-overlay.open{display:block}
+.drawer{position:fixed;left:-280px;top:0;width:280px;max-height:100vh;height:100%;background:#fff;z-index:300;transition:left .25s;overflow-y:scroll;box-shadow:2px 0 12px rgba(0,0,0,.2);-webkit-overflow-scrolling:touch}
+.drawer::-webkit-scrollbar{width:8px;-webkit-appearance:none}
+.drawer::-webkit-scrollbar-track{background:#e8e8e8;border-radius:4px}
+.drawer::-webkit-scrollbar-thumb{background:#0d6efd;border-radius:4px;min-height:40px}
+.drawer::-webkit-scrollbar-thumb:hover{background:#0a58ca}
+.drawer{scrollbar-width:thin;scrollbar-color:#0d6efd #e8e8e8;scrollbar-gutter:stable}
+.drawer.open{left:0}
+.drawer-head{background:linear-gradient(135deg,#0a1628,#13284a);color:#fff;padding:24px 20px}
+.drawer-head .dh-logo{display:flex;align-items:center;margin-bottom:8px}
+.drawer-head .dh-logo img{max-width:160px;width:100%;filter:brightness(0) invert(1);-webkit-filter:brightness(0) invert(1)}
+.drawer-head .dh-user{margin-top:14px;padding-top:14px;border-top:1px solid rgba(255,255,255,.15);font-size:13px}
+.drawer-head .dh-role{display:inline-block;margin-top:4px;padding:2px 10px;background:rgba(255,255,255,.15);border-radius:12px;font-size:11px;font-weight:600}
+.drawer-menu{padding:12px 0}
+.drawer-item{display:flex;align-items:center;gap:14px;padding:14px 20px;font-size:15px;font-weight:500;color:var(--text);transition:.1s}
+.drawer-item:active{background:var(--bg)}
+.drawer-item.active{background:var(--primary-light);color:var(--primary);border-right:3px solid var(--primary)}
+.drawer-item .di-icon{font-size:20px;width:24px;text-align:center}
+.drawer-divider{height:1px;background:var(--border);margin:8px 20px}
+.drawer-item.danger{color:var(--danger)}
+
+/* Views */
+.view{display:none;padding:16px;padding-bottom:80px;animation:fadeIn .2s}
+.view.active{display:block}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+/* Dashboard */
+.dash-greeting{margin-bottom:16px}
+.dash-greeting h2{font-size:22px;font-weight:700}
+.dash-greeting p{font-size:13px;color:var(--text-muted);margin-top:2px}
+.stat-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:20px}
+.stat-card{background:#fff;border-radius:var(--radius);padding:18px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.stat-card .stat-label{font-size:12px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+.stat-card .stat-value{font-size:32px;font-weight:800;margin-top:4px}
+.stat-card.hot .stat-value{color:var(--hot)}
+.stat-card.warm .stat-value{color:var(--warm)}
+.stat-card.cold .stat-value{color:var(--cold)}
+.stat-card.today{background:linear-gradient(135deg,#0d6efd,#0a58ca);color:#fff}
+.stat-card.today .stat-label{color:rgba(255,255,255,.8)}
+.stat-card.today .stat-value{color:#fff}
+.stat-card.followup{background:linear-gradient(135deg,#fd7e14,#dc6c02);color:#fff}
+.stat-card.followup .stat-label{color:rgba(255,255,255,.85)}
+.stat-card.followup .stat-value{color:#fff}
+.dash-section{margin-bottom:20px}
+.dash-section h3{font-size:15px;font-weight:700;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between}
+.mini-chart{background:#fff;border-radius:var(--radius);padding:16px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.bar-row{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.bar-label{width:90px;font-size:12px;font-weight:600;color:var(--text-muted);flex-shrink:0}
+.bar-track{flex:1;height:22px;background:var(--bg);border-radius:6px;overflow:hidden}
+.bar-fill{height:100%;border-radius:6px;display:flex;align-items:center;justify-content:flex-end;padding-right:6px;font-size:11px;font-weight:700;color:#fff;transition:width .4s}
+.bar-fill.b-hot{background:var(--hot)}
+.bar-fill.b-warm{background:var(--warm)}
+.bar-fill.b-cold{background:var(--cold)}
+
+/* Main action buttons */
+.main-actions{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px}
+.action-btn{border-radius:var(--radius);padding:24px 14px;text-align:center;font-weight:700;font-size:15px;display:flex;flex-direction:column;align-items:center;gap:8px;box-shadow:0 4px 12px rgba(0,0,0,.08);transition:.15s}
+.action-btn:active{transform:scale(.97)}
+.action-btn .ab-icon{font-size:32px}
+.action-btn.scan{background:linear-gradient(135deg,#0d6efd,#0a58ca);color:#fff}
+.action-btn.manual{background:linear-gradient(135deg,#198754,#157347);color:#fff}
+.action-btn.leads{background:linear-gradient(135deg,#6f42c1,#5a32a3);color:#fff}
+.action-btn.export{background:linear-gradient(135deg,#fd7e14,#dc6c02);color:#fff}
+
+/* Scanner */
+#scannerContainer{position:relative}
+#qrReader{width:100%!important;border:none!important;border-radius:var(--radius);overflow:hidden}
+#qrReader video{border-radius:var(--radius)}
+.scan-overlay{position:absolute;bottom:16px;left:0;right:0;text-align:center;z-index:10}
+.scan-frame{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:70%;max-width:280px;aspect-ratio:1;border:3px solid #fff;border-radius:12px;box-shadow:0 0 0 9999px rgba(0,0,0,.4);pointer-events:none}
+.scan-status{text-align:center;padding:16px;font-size:14px;font-weight:600;color:var(--text-muted)}
+.scan-result-card{background:#fff;border-radius:var(--radius);padding:16px;margin-top:16px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.scan-result-card h4{font-size:14px;font-weight:700;margin-bottom:10px;color:var(--text-muted)}
+.parsed-field{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:14px}
+.parsed-field:last-child{border-bottom:none}
+.parsed-field .pf-label{color:var(--text-muted);font-weight:500}
+.parsed-field .pf-value{font-weight:600;text-align:right;max-width:60%;word-break:break-word}
+.dup-warning{background:var(--danger-light);border:2px solid var(--danger);border-radius:10px;padding:12px;margin-top:12px;font-size:13px;color:var(--danger);font-weight:600}
+
+/* Form */
+.form-card{background:#fff;border-radius:var(--radius);padding:20px;margin-bottom:16px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.form-card h3{font-size:16px;font-weight:700;margin-bottom:14px;padding-bottom:10px;border-bottom:2px solid var(--border)}
+.field-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.chip-group{display:flex;flex-wrap:wrap;gap:8px}
+.chip{padding:9px 16px;border-radius:20px;border:2px solid var(--border);font-size:13px;font-weight:600;color:var(--text-muted);background:#fff;transition:.15s}
+.chip.active{background:var(--primary);border-color:var(--primary);color:#fff}
+.chip:active{transform:scale(.95)}
+.priority-chips .chip.hot.active{background:var(--hot);border-color:var(--hot)}
+.priority-chips .chip.warm.active{background:var(--warm);border-color:var(--warm)}
+.priority-chips .chip.cold.active{background:var(--cold);border-color:var(--cold)}
+.form-actions{display:flex;gap:10px;margin-top:18px}
+.form-actions .btn{flex:1}
+.form-actions .btn-half{flex:1}
+.save-success{text-align:center;padding:40px 20px}
+.save-success .ss-icon{font-size:64px;margin-bottom:16px}
+.save-success h2{font-size:22px;font-weight:700;color:var(--success);margin-bottom:6px}
+.save-success p{color:var(--text-muted);font-size:14px}
+
+/* Leads list */
+.search-bar{position:sticky;top:74px;z-index:50;background:var(--bg);padding:10px 0;margin:-16px -16px 12px;padding-left:16px;padding-right:16px}
+.search-bar input{width:100%;padding:12px 16px;border:2px solid var(--border);border-radius:10px;background:#fff;font-size:15px}
+.filter-chips{display:flex;gap:8px;overflow-x:auto;padding-bottom:8px;-webkit-overflow-scrolling:touch}
+.filter-chips::-webkit-scrollbar{display:none}
+.filter-chip{padding:7px 14px;border-radius:20px;background:#fff;border:1px solid var(--border);font-size:12px;font-weight:600;color:var(--text-muted);white-space:nowrap;flex-shrink:0}
+.filter-chip.active{background:var(--primary);color:#fff;border-color:var(--primary)}
+.lead-item{background:#fff;border-radius:var(--radius);padding:14px;margin-bottom:10px;box-shadow:0 1px 4px rgba(0,0,0,.05);transition:.1s}
+.lead-item:active{transform:scale(.98)}
+.lead-item .li-top{display:flex;justify-content:space-between;align-items:flex-start}
+.lead-item .li-name{font-size:15px;font-weight:700}
+.lead-item .li-company{font-size:13px;color:var(--text-muted);margin-top:2px}
+.lead-item .li-meta{display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap}
+.priority-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.priority-dot.hot{background:var(--hot)}.priority-dot.warm{background:var(--warm)}.priority-dot.cold{background:var(--cold)}
+.lead-tag{font-size:11px;padding:2px 8px;border-radius:10px;font-weight:600}
+.lead-tag.interest{background:#e7f0ff;color:var(--primary)}
+.lead-tag.sync{font-size:10px;padding:1px 7px}
+.lead-tag.sync.synced{background:var(--success-light);color:var(--success)}
+.lead-tag.sync.pending{background:var(--warning-light);color:var(--warning)}
+.lead-tag.sync.failed{background:var(--danger-light);color:var(--danger)}
+.lead-item .li-bottom{display:flex;justify-content:space-between;align-items:center;margin-top:8px;font-size:12px;color:var(--text-muted)}
+.empty-state{text-align:center;padding:60px 20px;color:var(--text-muted)}
+.empty-state .es-icon{font-size:48px;margin-bottom:12px;opacity:.4}
+.empty-state p{font-size:14px}
+
+/* Lead detail */
+.detail-card{background:#fff;border-radius:var(--radius);padding:18px;margin-bottom:14px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.detail-header{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+.detail-avatar{width:52px;height:52px;border-radius:50%;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;flex-shrink:0}
+.detail-header h3{font-size:18px;font-weight:700}
+.detail-header p{font-size:13px;color:var(--text-muted)}
+.detail-row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:14px}
+.detail-row:last-child{border-bottom:none}
+.detail-row .dr-label{color:var(--text-muted);font-weight:500}
+.detail-row .dr-value{font-weight:600;text-align:right;max-width:60%;word-break:break-word}
+.action-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+.action-circle{display:flex;flex-direction:column;align-items:center;gap:6px;padding:14px 6px;background:#fff;border-radius:var(--radius);box-shadow:0 2px 8px rgba(0,0,0,.06);font-size:12px;font-weight:600;color:var(--text)}
+.action-circle:active{transform:scale(.95)}
+.action-circle .ac-icon{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;color:#fff}
+.action-circle .ac-icon.call{background:var(--success)}
+.action-circle .ac-icon.email{background:var(--primary)}
+.action-circle .ac-icon.whatsapp{background:#25D366}
+.action-circle .ac-icon.edit{background:var(--warning)}
+
+/* Export */
+.export-card{background:#fff;border-radius:var(--radius);padding:20px;margin-bottom:16px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.export-card h3{font-size:16px;font-weight:700;margin-bottom:14px}
+.export-opt{display:flex;align-items:center;gap:12px;padding:14px;border:2px solid var(--border);border-radius:10px;margin-bottom:10px;font-weight:600;transition:.1s}
+.export-opt:active{border-color:var(--primary)}
+.export-opt .eo-icon{width:44px;height:44px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:22px;color:#fff}
+.export-opt .eo-icon.csv{background:var(--success)}
+.export-opt .eo-icon.xlsx{background:var(--primary)}
+.export-opt .eo-info{flex:1}
+.export-opt .eo-title{font-size:15px}
+.export-opt .eo-desc{font-size:12px;color:var(--text-muted);font-weight:400}
+.filter-section{margin-bottom:16px}
+.filter-section select{width:100%;padding:12px;border:2px solid var(--border);border-radius:10px;background:#fff}
+
+/* Admin */
+.user-card{background:#fff;border-radius:var(--radius);padding:16px;margin-bottom:10px;box-shadow:0 1px 4px rgba(0,0,0,.05);display:flex;align-items:center;justify-content:space-between}
+.user-card .uc-info h4{font-size:15px;font-weight:700}
+.user-card .uc-info p{font-size:12px;color:var(--text-muted)}
+.user-card .uc-role{padding:4px 12px;border-radius:12px;font-size:11px;font-weight:700}
+.user-card .uc-role.admin{background:var(--danger-light);color:var(--danger)}
+.user-card .uc-role.salesperson{background:#e7f0ff;color:var(--primary)}
+.cat-card{background:#fff;border-radius:var(--radius);padding:14px 16px;margin-bottom:8px;box-shadow:0 1px 4px rgba(0,0,0,.05);display:flex;align-items:center;justify-content:space-between}
+.cat-card .cc-name{font-size:14px;font-weight:600}
+
+/* Bottom nav */
+.bottom-nav{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid var(--border);display:flex;z-index:100;padding-bottom:env(safe-area-inset-bottom)}
+.nav-item{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:10px 0;font-size:11px;font-weight:600;color:var(--text-muted)}
+.nav-item.active{color:var(--primary)}
+.nav-item .ni-icon{font-size:22px}
+
+/* Toast */
+.toast{position:fixed;bottom:70px;left:50%;transform:translateX(-50%) translateY(100px);background:var(--dark);color:#fff;padding:12px 24px;border-radius:30px;font-size:14px;font-weight:500;z-index:9999;opacity:0;transition:.3s;max-width:90%;text-align:center}
+.toast.show{transform:translateX(-50%) translateY(0);opacity:1}
+.toast.success{background:var(--success)}
+.toast.error{background:var(--danger)}
+
+/* Modal */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:500;align-items:center;justify-content:center;padding:20px}
+.modal-overlay.open{display:flex}
+.modal{background:#fff;border-radius:var(--radius);width:100%;max-width:420px;max-height:85vh;overflow-y:auto}
+.modal-head{padding:18px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+.modal-head h3{font-size:17px;font-weight:700}
+.modal-close{background:none;font-size:24px;color:var(--text-muted);line-height:1;padding:4px}
+.modal-body{padding:20px}
+.modal-foot{padding:16px 20px;border-top:1px solid var(--border);display:flex;gap:10px}
+
+/* Sync banner */
+.sync-banner{display:none;padding:8px 16px;background:var(--warning);color:#fff;font-size:12px;text-align:center;font-weight:600}
+.sync-banner.show{display:block}
+.sync-banner.online{background:var(--success)}
+
+/* Responsive */
+@media(min-width:768px){
+  .main-actions{grid-template-columns:repeat(4,1fr)}
+  .stat-grid{grid-template-columns:repeat(3,1fr)}
+  .view{max-width:700px;margin:0 auto}
+  .search-bar{max-width:700px;left:50%;transform:translateX(-50%);width:100%}
+}
+@media(min-width:1024px){
+  .view{max-width:900px}
+}
+</style>
+</head>
+<body>
+
+<!-- ===== LOGIN SCREEN ===== -->
+<div id="loginScreen">
+  <div class="login-card">
+    <div class="login-logo">
+      <img src="logo-login.png" alt="CircuitNet Technologies" style="max-width:240px;width:100%;margin-bottom:10px">
+      <p class="subtitle">Expo Lead Scanner</p>
+      <div class="expo-tag">ELECTRONICA 2026 · BIEC BENGALURU · HALL 3 · STALL D15</div>
+    </div>
+    <div class="form-group">
+      <label>Username</label>
+      <input type="text" id="loginUser" placeholder="Enter username" autocomplete="username">
+    </div>
+    <div class="form-group">
+      <label>Password</label>
+      <input type="password" id="loginPass" placeholder="Enter password" autocomplete="current-password">
+    </div>
+    <button class="btn btn-primary btn-large" onclick="App.doLogin()">Login</button>
+    <div class="login-error" id="loginError"></div>
+    <input type="file" id="loginImportFile" accept=".json" style="display:none" onchange="Admin.importTeamConfig(this.files[0], true); this.value='';">
+    <button class="btn btn-outline" style="width:100%;margin-top:10px;font-size:13px" onclick="document.getElementById('loginImportFile').click()">📥 Import Team Config (get users from admin)</button>
+    <div class="login-footer">Login is saved on this phone. Use ☰ → Logout to switch users.</div>
+  </div>
+</div>
+
+<!-- ===== APP SCREEN ===== -->
+<div id="appScreen">
+  <!-- Header -->
+  <div class="app-header">
+    <div class="hdr-left">
+      <button class="menu-btn" onclick="App.toggleDrawer()">☰</button>
+    </div>
+    <div class="hdr-center">
+      <img src="logo-header.png" alt="CircuitNet Technologies">
+    </div>
+    <div class="hdr-right">
+      <div class="sync-badge sync-online" id="syncBadge" onclick="App.showSyncInfo()">
+        <span id="syncIcon">●</span><span id="syncText">Online</span>
+      </div>
+      <div class="user-chip" onclick="App.toggleDrawer()">
+        <div class="user-avatar" id="hdrAvatar">U</div>
+      </div>
+    </div>
+  </div>
+  <div class="app-subbar">Lead Scanner</div>
+  <input type="file" id="scanFileInput" accept="image/*" style="display:none" onchange="Scanner.scanFromFile(this.files[0]); this.value='';">
+  <input type="file" id="cardScanInput" accept="image/*" capture="environment" style="display:none" onchange="CardScanner.scan(this.files[0]); this.value='';">
+
+  <!-- Sync banner -->
+  <div class="sync-banner" id="syncBanner"></div>
+
+  <!-- Drawer -->
+  <div class="drawer-overlay" id="drawerOverlay" onclick="App.toggleDrawer()"></div>
+  <div class="drawer" id="drawer">
+    <div class="drawer-head">
+      <div class="dh-logo">
+        <img src="logo-drawer.png" alt="CircuitNet Technologies">
+      </div>
+      <div style="margin-top:8px;font-size:12px;opacity:.8">Electronica 2026 · Stall D15</div>
+      <div class="dh-user">
+        <div id="drawerUserName">User</div>
+        <div class="dh-role" id="drawerUserRole">Salesperson</div>
+      </div>
+    </div>
+    <div style="padding:12px 20px 4px;border-bottom:1px solid #eee">
+      <label style="font-size:11px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.5px">Current Event</label>
+      <select id="eventSelector" onchange="App.setCurrentEvent(this.value)" style="width:100%;padding:10px 12px;border:2px solid var(--border);border-radius:8px;background:#fff;font-size:14px;margin-top:6px;margin-bottom:8px"></select>
+    </div>
+    <div class="drawer-menu">
+      <div class="drawer-item active" onclick="App.navigate('dashboard')"><span class="di-icon">📊</span> Dashboard</div>
+      <div class="drawer-item" onclick="App.navigate('scan')"><span class="di-icon">📷</span> Scan Badge</div>
+      <div class="drawer-item" onclick="document.getElementById('scanFileInput').click()"><span class="di-icon">🖼️</span> Scan from Image</div>
+      <div class="drawer-item" onclick="App.navigate('manual')"><span class="di-icon">✍️</span> Manual Entry</div>
+      <div class="drawer-item" onclick="document.getElementById('cardScanInput').click()"><span class="di-icon">🪪</span> Scan Visiting Card</div>
+      <div class="drawer-item" onclick="App.navigate('leads')"><span class="di-icon">📋</span> View Leads</div>
+      <div class="drawer-item" onclick="App.navigate('export')"><span class="di-icon">📤</span> Export</div>
+      <div class="drawer-divider"></div>
+      <div class="drawer-item admin-only" onclick="App.navigate('events')"><span class="di-icon">🎪</span> Event Management</div>
+      <div class="drawer-item admin-only" onclick="App.navigate('users')"><span class="di-icon">👥</span> User Management</div>
+      <div class="drawer-item admin-only" onclick="App.navigate('categories')"><span class="di-icon">🏷️</span> Interest Categories</div>
+      <div class="drawer-item admin-only" onclick="App.navigate('settings')"><span class="di-icon">⚙️</span> Settings</div>
+      <div class="drawer-divider admin-only"></div>
+      <div class="drawer-item" onclick="App.loadDemoData()"><span class="di-icon">🧪</span> Load Demo Data</div>
+      <div class="drawer-item" onclick="App.checkForUpdates()" id="drawerCheckUpdate"><span class="di-icon">🔄</span> Check for Updates</div>
+      <div class="drawer-item danger" onclick="App.logout()"><span class="di-icon">🚪</span> Logout</div>
+    </div>
+  </div>
+
+  <!-- ===== DASHBOARD ===== -->
+  <div class="view active" id="view-dashboard">
+    <div class="dash-greeting">
+      <h2 id="dashGreeting">Dashboard</h2>
+      <p id="dashDate"></p>
+    </div>
+    <div class="stat-grid">
+      <div class="stat-card today"><div class="stat-label">Total Leads</div><div class="stat-value" id="statTotal">0</div></div>
+      <div class="stat-card followup"><div class="stat-label">Follow-ups</div><div class="stat-value" id="statFollowup">0</div></div>
+      <div class="stat-card hot"><div class="stat-label">Hot</div><div class="stat-value" id="statHot">0</div></div>
+      <div class="stat-card warm"><div class="stat-label">Warm</div><div class="stat-value" id="statWarm">0</div></div>
+      <div class="stat-card cold"><div class="stat-label">Cold</div><div class="stat-value" id="statCold">0</div></div>
+      <div class="stat-card"><div class="stat-label">Today</div><div class="stat-value" id="statToday">0</div></div>
+    </div>
+    <div class="main-actions">
+      <div class="action-btn scan" onclick="App.navigate('scan')"><span class="ab-icon">📷</span>SCAN BADGE</div>
+      <div class="action-btn manual" onclick="App.navigate('manual')"><span class="ab-icon">✍️</span>MANUAL ENTRY</div>
+      <div class="action-btn leads" onclick="App.navigate('leads')"><span class="ab-icon">📋</span>VIEW LEADS</div>
+      <div class="action-btn export" onclick="App.navigate('export')"><span class="ab-icon">📤</span>EXPORT</div>
+    </div>
+    <div class="dash-section">
+      <h3>Leads by Priority</h3>
+      <div class="mini-chart" id="priorityChart"></div>
+    </div>
+    <div class="dash-section">
+      <h3>Leads by Interest</h3>
+      <div class="mini-chart" id="interestChart"></div>
+    </div>
+    <div class="dash-section">
+      <h3>Leads by Salesperson</h3>
+      <div class="mini-chart" id="salespersonChart"></div>
+    </div>
+    <div class="dash-section">
+      <h3>☁️ Cloud Sync Debug</h3>
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <button class="btn btn-primary" style="flex:1;padding:10px;font-size:13px" onclick="Cloud.testInsert()">Test POST</button>
+        <button class="btn btn-outline" style="flex:1;padding:10px;font-size:13px" onclick="Cloud.testGet()">Test GET</button>
+        <button class="btn btn-outline" style="flex:1;padding:10px;font-size:13px" onclick="Cloud.sync()">Sync Now</button>
+      </div>
+      <pre id="syncDebugLog" style="background:#1a1a2e;color:#0f0;padding:10px;border-radius:8px;font-size:11px;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all">Sync log will appear here...</pre>
+    </div>
+    <div class="dash-section">
+      <h3>Leads by Date (Last 7 days)</h3>
+      <div class="mini-chart" id="dateChart"></div>
+    </div>
+  </div>
+
+  <!-- ===== SCAN ===== -->
+  <div class="view" id="view-scan">
+    <div id="scannerContainer">
+      <div id="qrReader"></div>
+      <div class="scan-frame" id="scanFrame" style="display:none"></div>
+    </div>
+    <div class="scan-status" id="scanStatus">Starting camera...</div>
+    <button class="btn btn-outline" style="width:100%;margin-top:10px" onclick="App.navigate('manual')">✍️ Switch to Manual Entry</button>
+    <div id="scanResult"></div>
+  </div>
+
+  <!-- ===== MANUAL ENTRY / LEAD FORM ===== -->
+  <div class="view" id="view-manual">
+    <div id="manualFormContainer"></div>
+  </div>
+
+  <!-- ===== LEADS LIST ===== -->
+  <div class="view" id="view-leads">
+    <div class="search-bar">
+      <input type="text" id="searchInput" placeholder="🔍 Search name, company, phone, email..." oninput="Leads.render()">
+    </div>
+    <div class="filter-chips" id="filterChips"></div>
+    <div id="leadsList"></div>
+  </div>
+
+  <!-- ===== LEAD DETAIL ===== -->
+  <div class="view" id="view-detail">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+      <button class="btn btn-outline" onclick="App.navigate('leads')" style="padding:10px 14px">← Back</button>
+      <h2 style="flex:1">Lead Details</h2>
+    </div>
+    <div id="detailContainer"></div>
+  </div>
+
+  <!-- ===== EXPORT ===== -->
+  <div class="view" id="view-export">
+    <h2 style="margin-bottom:16px">Export Leads</h2>
+    <div class="export-card">
+      <h3>Filter</h3>
+      <div class="filter-section">
+        <label style="font-size:13px;font-weight:600;display:block;margin-bottom:6px">Priority</label>
+        <select id="exportPriority"><option value="">All Priorities</option><option>Hot</option><option>Warm</option><option>Cold</option></select>
+      </div>
+      <div class="filter-section">
+        <label style="font-size:13px;font-weight:600;display:block;margin-bottom:6px">Interest</label>
+        <select id="exportInterest"></select>
+      </div>
+      <div class="filter-section">
+        <label style="font-size:13px;font-weight:600;display:block;margin-bottom:6px">Salesperson</label>
+        <select id="exportSalesperson"></select>
+      </div>
+      <div class="filter-section">
+        <label style="font-size:13px;font-weight:600;display:block;margin-bottom:6px">Sync Status</label>
+        <select id="exportSync"><option value="">All</option><option value="Synced">Synced</option><option value="Pending">Pending</option><option value="Failed">Failed</option></select>
+      </div>
+    </div>
+    <div class="export-card">
+      <h3>Export Format</h3>
+      <div class="export-opt" onclick="Export.doExport('csv')">
+        <div class="eo-icon csv">📄</div>
+        <div class="eo-info"><div class="eo-title">CSV File</div><div class="eo-desc">Comma-separated, opens in Excel</div></div>
+        <div style="font-size:20px;color:var(--text-muted)">›</div>
+      </div>
+      <div class="export-opt" onclick="Export.doExport('xlsx')">
+        <div class="eo-icon xlsx">📊</div>
+        <div class="eo-info"><div class="eo-title">Excel (.xlsx)</div><div class="eo-desc">Full Excel spreadsheet</div></div>
+        <div style="font-size:20px;color:var(--text-muted)">›</div>
+      </div>
+    </div>
+    <div class="export-card">
+      <h3>Summary</h3>
+      <div id="exportSummary" style="font-size:14px;color:var(--text-muted)">Select filters and tap an export option above.</div>
+    </div>
+  </div>
+
+  <!-- ===== EVENT MANAGEMENT ===== -->
+  <div class="view" id="view-events">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h2>Event Management</h2>
+      <button class="btn btn-primary" style="padding:8px 14px;font-size:13px" onclick="Admin.addEvent()">+ Add Event</button>
+    </div>
+    <div id="eventsList"></div>
+  </div>
+
+  <!-- ===== USER MANAGEMENT ===== -->
+  <div class="view" id="view-users">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h2>User Management</h2>
+      <button class="btn btn-primary" style="padding:10px 16px" onclick="Admin.showUserModal()">+ Add User</button>
+    </div>
+    <!-- Team Sync section -->
+    <div class="form-card" style="border:2px dashed var(--primary);background:#f0f6ff">
+      <h3 style="border-bottom:2px solid var(--primary);color:var(--primary)">🔄 Team Sync — Share Users Across Phones</h3>
+      <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">
+        Each phone has its own local database. To make new users appear on all team members' phones:
+        <br>1. <b>Admin</b> taps Export below → a file is downloaded<br>
+        2. Share it via WhatsApp / AirDrop / USB to the team<br>
+        3. Each person opens the app → ☰ menu → Settings → <b>Import Team Config</b>
+        <br>New phones can also import from the login screen.
+      </p>
+      <div style="display:flex;gap:10px">
+        <button class="btn btn-primary" style="flex:1" onclick="Admin.exportTeamConfig()">📤 Export Team Config</button>
+      </div>
+      <div style="margin-top:10px">
+        <input type="file" id="importUsersFile" accept=".json" style="display:none" onchange="Admin.importTeamConfig(this.files[0]); this.value='';">
+        <button class="btn btn-outline" style="width:100%" onclick="document.getElementById('importUsersFile').click()">📥 Import Team Config</button>
+      </div>
+    </div>
+    <div id="userList"></div>
+  </div>
+
+  <!-- ===== CATEGORIES ===== -->
+  <div class="view" id="view-categories">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h2>Interest Categories</h2>
+      <button class="btn btn-primary" style="padding:10px 16px" onclick="Admin.showCategoryModal()">+ Add</button>
+    </div>
+    <div id="categoryList"></div>
+  </div>
+
+  <!-- ===== SETTINGS ===== -->
+  <div class="view" id="view-settings">
+    <h2 style="margin-bottom:16px">Settings</h2>
+    <div class="form-card">
+      <h3>Company Info</h3>
+      <div class="form-group"><label>Company Name</label><input type="text" id="setCompanyName" value="CircuitNet Technologies"></div>
+      <div class="form-group"><label>Event Name</label><input type="text" id="setEventName" value="Electronica 2026"></div>
+      <div class="form-group"><label>Venue</label><input type="text" id="setVenue" value="BIEC Bengaluru, Hall 3, Stall D15"></div>
+      <div class="form-group"><label>Lead Source (Default)</label><input type="text" id="setLeadSource" value="Electronica 2026"></div>
+      <button class="btn btn-primary" style="width:100%" onclick="Admin.saveSettings()">Save Settings</button>
+    </div>
+    <div class="form-card">
+      <h3>Data Management</h3>
+      <input type="file" id="importSettingsFile" accept=".json" style="display:none" onchange="Admin.importTeamConfig(this.files[0]); this.value='';">
+      <button class="btn btn-primary" style="width:100%;margin-bottom:10px" onclick="document.getElementById('importSettingsFile').click()">📥 Import Team Config (users + categories)</button>
+      <button class="btn btn-outline" style="width:100%;margin-bottom:10px" onclick="App.syncNow()">🔄 Sync Now</button>
+      <button class="btn btn-outline" style="width:100%;margin-bottom:10px" onclick="App.loadDemoData()">🧪 Load Demo Data</button>
+      <button class="btn btn-danger" style="width:100%" onclick="App.clearAllData()">🗑️ Clear All Data</button>
+    </div>
+    <div class="form-card">
+      <h3>About</h3>
+      <div class="detail-row"><span class="dr-label">App</span><span class="dr-value">CircuitNet Expo Lead Scanner v1.0</span></div>
+      <div class="detail-row"><span class="dr-label">Company</span><span class="dr-value">CircuitNet Technologies</span></div>
+      <div class="detail-row"><span class="dr-label">Event</span><span class="dr-value">Electronica 2026</span></div>
+      <div class="detail-row"><span class="dr-label">Offline-first</span><span class="dr-value">✓ Enabled</span></div>
+    </div>
+  </div>
+
+  <!-- Bottom nav -->
+  <div class="bottom-nav">
+    <div class="nav-item active" data-nav="dashboard" onclick="App.navigate('dashboard')"><span class="ni-icon">📊</span>Dashboard</div>
+    <div class="nav-item" data-nav="scan" onclick="App.navigate('scan')"><span class="ni-icon">📷</span>Scan</div>
+    <div class="nav-item" data-nav="leads" onclick="App.navigate('leads')"><span class="ni-icon">📋</span>Leads</div>
+    <div class="nav-item" data-nav="export" onclick="App.navigate('export')"><span class="ni-icon">📤</span>Export</div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<!-- Modal -->
+<div class="modal-overlay" id="modalOverlay">
+  <div class="modal" id="modalContent"></div>
+</div>
+
+<script src="lib/html5-qrcode.min.js"></script>
+<script src="lib/xlsx.full.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
