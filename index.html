@@ -162,9 +162,10 @@ a{text-decoration:none;color:inherit}
 /* Add phone button */
 .add-phone-btn{display:inline-flex;align-items:center;gap:4px;padding:6px 14px;background:var(--primary);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .2s}
 .add-phone-btn:hover{opacity:.9}
-.phone-extra-field{display:flex;gap:8px;align-items:flex-start;margin-top:8px}
-.phone-extra-field input{flex:1}
-.phone-remove-btn{flex-shrink:0;width:42px;height:46px;border:none;border-radius:10px;background:#fee;color:#dc3545;font-size:20px;font-weight:700;cursor:pointer;transition:background .2s}
+.phone-extra-field{display:flex;gap:8px;align-items:stretch;margin-top:8px}
+.phone-extra-field input{flex:1;padding:13px 14px;border:2px solid var(--border);border-radius:10px;font-size:15px;color:var(--text);transition:border .2s;min-height:50px}
+.phone-extra-field input:focus{border-color:var(--primary)}
+.phone-remove-btn{flex-shrink:0;width:46px;min-height:50px;border:none;border-radius:10px;background:#fee;color:#dc3545;font-size:20px;font-weight:700;cursor:pointer;transition:background .2s}
 .phone-remove-btn:hover{background:#fdd}
 .chip-group{display:flex;flex-wrap:wrap;gap:8px}
 .chip{padding:9px 16px;border-radius:20px;border:2px solid var(--border);font-size:13px;font-weight:600;color:var(--text-muted);background:#fff;transition:.15s}
@@ -504,7 +505,7 @@ a{text-decoration:none;color:inherit}
   <div class="view" id="view-events">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
       <h2>Event Management</h2>
-      <button class="btn btn-primary" style="padding:8px 14px;font-size:13px" onclick="Admin.addEvent()">+ Add Event</button>
+      <button class="btn btn-primary" style="padding:8px 14px;font-size:13px" onclick="Admin.showEventModal()">+ Add Event</button>
     </div>
     <div id="eventsList"></div>
   </div>
@@ -514,24 +515,6 @@ a{text-decoration:none;color:inherit}
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
       <h2>User Management</h2>
       <button class="btn btn-primary" style="padding:10px 16px" onclick="Admin.showUserModal()">+ Add User</button>
-    </div>
-    <!-- Team Sync section -->
-    <div class="form-card" style="border:2px dashed var(--primary);background:#f0f6ff">
-      <h3 style="border-bottom:2px solid var(--primary);color:var(--primary)">🔄 Team Sync — Share Users Across Phones</h3>
-      <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">
-        Each phone has its own local database. To make new users appear on all team members' phones:
-        <br>1. <b>Admin</b> taps Export below → a file is downloaded<br>
-        2. Share it via WhatsApp / AirDrop / USB to the team<br>
-        3. Each person opens the app → ☰ menu → Settings → <b>Import Team Config</b>
-        <br>New phones can also import from the login screen.
-      </p>
-      <div style="display:flex;gap:10px">
-        <button class="btn btn-primary" style="flex:1" onclick="Admin.exportTeamConfig()">📤 Export Team Config</button>
-      </div>
-      <div style="margin-top:10px">
-        <input type="file" id="importUsersFile" accept=".json" style="display:none" onchange="Admin.importTeamConfig(this.files[0]); this.value='';">
-        <button class="btn btn-outline" style="width:100%" onclick="document.getElementById('importUsersFile').click()">📥 Import Team Config</button>
-      </div>
     </div>
     <div id="userList"></div>
   </div>
@@ -575,8 +558,6 @@ a{text-decoration:none;color:inherit}
     </div>
     <div class="form-card">
       <h3>Data Management</h3>
-      <input type="file" id="importSettingsFile" accept=".json" style="display:none" onchange="Admin.importTeamConfig(this.files[0]); this.value='';">
-      <button class="btn btn-primary" style="width:100%;margin-bottom:10px" onclick="document.getElementById('importSettingsFile').click()">📥 Import Team Config (users + categories)</button>
       <button class="btn btn-outline" style="width:100%;margin-bottom:10px;background:#e8f0fe;border-color:var(--primary);font-weight:600" onclick="App.navigate('datasync')">☁️ Data Sync & Debug</button>
       <button class="btn btn-outline" style="width:100%;margin-bottom:10px" onclick="App.syncNow()">🔄 Sync Now</button>
       <button class="btn btn-outline" style="width:100%;margin-bottom:10px" onclick="App.loadDemoData()">🧪 Load Demo Data</button>

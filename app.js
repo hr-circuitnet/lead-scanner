@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v35';
+const APP_VERSION = 'circuitnet-v36';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -563,14 +563,13 @@ const App = {
       await dbPut('users', { id: 'u-sales2', name: 'Priya Sharma', username: 'priya', password: 'pass123', role: 'salesperson', active: true, created: new Date().toISOString() });
       await dbPut('users', { id: 'u-sales3', name: 'Arun Menon', username: 'arun', password: 'pass123', role: 'salesperson', active: true, created: new Date().toISOString() });
     }
-    // Seed categories (dedup by name — only add missing ones)
+    // Seed default categories ONLY on first install (when the store is empty).
+    // We intentionally do NOT re-add categories the admin has deleted, so
+    // deletions survive app restarts and version updates.
     const cats = await dbGetAll('categories');
-    const existingNames = {};
-    cats.forEach(function(c) { existingNames[(c.name||'').toLowerCase()] = true; });
-    for (const c of DEFAULT_CATEGORIES) {
-      if (!existingNames[c.toLowerCase()]) {
+    if (cats.length === 0) {
+      for (const c of DEFAULT_CATEGORIES) {
         await dbPut('categories', { id: 'cat-' + Date.now() + '-' + Math.random().toString(36).slice(2,8), name: c, active: true });
-        existingNames[c.toLowerCase()] = true;
       }
     }
     // Clean up duplicate categories (keep first occurrence of each name)
@@ -578,7 +577,7 @@ const App = {
     // Seed default event
     const events = await dbGetAll('events');
     if (events.length === 0) {
-      await dbPut('events', { id: 'evt-1', name: 'Electronica 2026', venue: 'BIEC Bengaluru, Hall 3, Stall D15', date: '2026-09-08', active: true, created: new Date().toISOString() });
+      await dbPut('events', { id: 'evt-1', name: 'Electronica 2026', venue: 'BIEC Bengaluru, Hall 3, Stall D15', startDate: '2026-09-08', endDate: '2026-09-10', date: '2026-09-08', active: true, created: new Date().toISOString() });
     }
   },
 
@@ -613,6 +612,7 @@ const App = {
       venue: 'BIEC Bengaluru, Hall 3, Stall D15',
       leadSource: 'Electronica 2026'
     };
+    if (!App.settings.userRoles) App.settings.userRoles = ['admin','salesperson'];
     // Ensure OCR key is set (default if not already in settings)
     if (!App.settings.ocrApiKey) App.settings.ocrApiKey = 'K88604395188957';
     // Load current event from localStorage (persists across sessions)
@@ -1540,12 +1540,97 @@ const Scanner = {
 const CardScanner = {
   isProcessing: false,
 
-  async scan(file) {
-    if (!file || this.isProcessing) return;
-    this.isProcessing = true;
-    App.toggleDrawer(false);
+  // Captured card images awaiting the user's choice (front, and optionally back)
+  pendingFiles: [],
+  isBackSide: false,
 
-    // Show processing overlay
+  scan(file) {
+    if (!file) return;
+    App.toggleDrawer(false);
+    // Store the captured image WITHOUT processing it yet. The preview screen
+    // lets the user Retake / Take Other Side / Finish before any OCR runs.
+    var url = URL.createObjectURL(file);
+    if (this.isBackSide) {
+      if (this.pendingFiles[1] && this.pendingFiles[1].url) { try { URL.revokeObjectURL(this.pendingFiles[1].url); } catch(e){} }
+      this.pendingFiles[1] = { file: file, url: url };
+    } else {
+      this.clearPending();
+      this.pendingFiles[0] = { file: file, url: url };
+    }
+    this.showCapturePreview();
+  },
+
+  clearPending() {
+    if (this.pendingFiles) {
+      this.pendingFiles.forEach(function(p){ if (p && p.url) { try { URL.revokeObjectURL(p.url); } catch(e){} } });
+    }
+    this.pendingFiles = [];
+  },
+
+  // Pre-processing preview: Retake / Take Other Side / Finish
+  showCapturePreview() {
+    var self = this;
+    var existing = document.getElementById('cardCaptureScreen');
+    if (existing) existing.remove();
+
+    var front = this.pendingFiles[0];
+    var back = this.pendingFiles[1];
+    var hasBack = !!back;
+    var sideLabel = hasBack ? 'Back side captured — review' : 'Front side captured — review';
+
+    var previewHtml = '';
+    if (front) previewHtml += '<div style="font-size:11px;color:#888;margin-bottom:4px">FRONT</div><img src="' + front.url + '" style="max-width:100%;max-height:30vh;border-radius:10px;margin-bottom:10px;border:2px solid #333;object-fit:contain">';
+    if (back) previewHtml += '<div style="font-size:11px;color:#888;margin-bottom:4px">BACK</div><img src="' + back.url + '" style="max-width:100%;max-height:30vh;border-radius:10px;margin-bottom:10px;border:2px solid #333;object-fit:contain">';
+
+    var overlay = document.createElement('div');
+    overlay.id = 'cardCaptureScreen';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.94);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;padding:20px;overflow-y:auto';
+    overlay.innerHTML =
+      '<div style="font-size:40px;margin-bottom:6px">🪪</div>' +
+      '<div style="font-size:17px;font-weight:600;margin-bottom:4px">' + sideLabel + '</div>' +
+      '<div style="font-size:12px;color:#888;margin-bottom:10px">Review the photo. Tap “Finish” to process it, or capture the other side.</div>' +
+      '<div style="width:100%;max-width:340px">' + previewHtml + '</div>' +
+      '<div style="display:flex;flex-direction:column;gap:10px;width:100%;max-width:340px;margin-top:6px">' +
+        '<button id="ccBtnRetake" style="padding:14px;border:2px solid #555;background:transparent;color:#fff;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">🔄 Retake' + (hasBack ? ' Back' : '') + '</button>' +
+        (hasBack ? '' : '<button id="ccBtnOtherSide" style="padding:14px;border:2px solid #0d6efd;background:transparent;color:#0d6efd;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">📷 Take Other Side</button>') +
+        '<button id="ccBtnFinish" style="padding:14px;border:none;background:#0d6efd;color:#fff;border-radius:10px;font-size:16px;font-weight:700;cursor:pointer">✅ Finish</button>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    document.getElementById('ccBtnRetake').onclick = function() {
+      overlay.remove();
+      if (hasBack) {
+        if (back && back.url) URL.revokeObjectURL(back.url);
+        self.pendingFiles[1] = null;
+        self.isBackSide = true;
+      } else {
+        self.clearPending();
+        self.isBackSide = false;
+      }
+      var input = document.getElementById('cardScanInput');
+      if (input) input.click();
+    };
+    if (!hasBack) {
+      document.getElementById('ccBtnOtherSide').onclick = function() {
+        overlay.remove();
+        self.isBackSide = true;
+        var input = document.getElementById('cardScanInput');
+        if (input) input.click();
+      };
+    }
+    document.getElementById('ccBtnFinish').onclick = function() {
+      overlay.remove();
+      var files = self.pendingFiles.filter(function(p){ return p && p.file; }).map(function(p){ return p.file; });
+      self.isBackSide = false;
+      self.processImages(files);
+    };
+  },
+
+  // Run OCR on the captured image(s), combine the text, then show results
+  async processImages(files) {
+    if (this.isProcessing) return;
+    this.isProcessing = true;
+
     var overlay = document.createElement('div');
     overlay.id = 'cardScanOverlay';
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;padding:20px';
@@ -1561,112 +1646,32 @@ const CardScanner = {
     var self = this;
 
     try {
-      // Get API key from settings
-      var apiKey = (App.settings && App.settings.ocrApiKey) ? App.settings.ocrApiKey : '';
-
-      var rawText = '';
+      var combinedRaw = '';
       var usedApi = false;
-
-      // Try OCR.space API first (if key is available)
-      if (apiKey) {
-        try {
-          statusEl.textContent = 'Uploading to OCR.space...';
-          progEl.style.width = '30%';
-
-          // Compress image to under 1MB for OCR.space free tier
-          var compressedBlob = await this.compressImage(file);
-          console.log('Card scan: compressed image size:', Math.round(compressedBlob.size / 1024), 'KB');
-
-          statusEl.textContent = 'Recognizing text via OCR.space...';
-          progEl.style.width = '60%';
-
-          var formData = new FormData();
-          formData.append('apikey', apiKey);
-          formData.append('file', compressedBlob, 'card.jpg');
-          formData.append('language', 'eng');
-          formData.append('isOverlayRequired', 'false');
-          formData.append('scale', 'true');
-          formData.append('OCREngine', '2');
-
-          var response = await fetch('https://api.ocr.space/parse/image', {
-            method: 'POST',
-            body: formData
-          });
-
-          var data = await response.json();
-          console.log('OCR.space response:', data);
-
-          if (data && !data.IsErroredOnProcessing && data.ParsedResults && data.ParsedResults.length > 0) {
-            rawText = (data.ParsedResults[0].ParsedText || '').trim();
-            usedApi = true;
-            progEl.style.width = '100%';
-            console.log('OCR.space raw text:', rawText);
-          } else {
-            console.warn('OCR.space error:', data ? data.ErrorMessage : 'no response');
-          }
-        } catch (apiErr) {
-          console.warn('OCR.space failed, falling back to Tesseract:', apiErr.message);
+      for (var i = 0; i < files.length; i++) {
+        statusEl.textContent = 'Scanning side ' + (i + 1) + ' of ' + files.length + '...';
+        var res = await self.ocrImage(files[i], statusEl, progEl, i, files.length);
+        if (res.rawText) {
+          if (combinedRaw) combinedRaw += String.fromCharCode(10) + '--- BACK SIDE ---' + String.fromCharCode(10);
+          combinedRaw += res.rawText;
+          if (res.usedApi) usedApi = true;
         }
       }
 
-      // If OCR.space didn't work, fall back to Tesseract (offline)
-      if (!rawText) {
-        statusEl.textContent = 'Using offline OCR engine...';
-        if (typeof Tesseract === 'undefined') {
-          await this.loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js');
-        }
+      var fields = self.parseCardText(combinedRaw);
+      fields.rawBadgeData = combinedRaw;
+      fields.ocrSource = usedApi ? 'OCR.space' : (combinedRaw ? 'Tesseract (offline)' : 'No OCR');
 
-        var processedCanvas = await this.preprocessImage(file);
-        var worker = await Tesseract.createWorker('eng', 1, {
-          logger: function(m) {
-            if (m.status === 'recognizing text') {
-              var pct = Math.round(m.progress * 100);
-              progEl.style.width = pct + '%';
-              statusEl.textContent = 'Recognizing text... ' + pct + '%';
-            } else if (m.status) {
-              statusEl.textContent = m.status + '...';
-            }
-          }
-        });
-        var psm = (Tesseract.PSM && Tesseract.PSM.SINGLE_BLOCK) ? Tesseract.PSM.SINGLE_BLOCK : '6';
-        await worker.setParameters({ tessedit_pageseg_mode: psm });
-        var result = await worker.recognize(processedCanvas);
-        await worker.terminate();
-        rawText = (result.data.text || '').trim();
-        console.log('Tesseract raw text:', rawText);
-      }
-
-      // Parse the extracted text
-      var fields = self.parseCardText(rawText);
-      fields.rawBadgeData = rawText;
-      fields.ocrSource = usedApi ? 'OCR.space' : 'Tesseract (offline)';
-
-      // If this is the back side scan, combine with front side data
-      if (self.isBackSide && self.pendingRawText) {
-        // Combine raw text: front side first, then back side
-        var combinedRaw = self.pendingRawText + '\n--- BACK SIDE ---\n' + rawText;
-        // Re-parse the combined text for better field extraction
-        var combinedFields = self.parseCardText(combinedRaw);
-        // Merge: use front side fields as base, fill in missing from back side
-        var frontFields = self.pendingFields || {};
-        for (var key in frontFields) {
-          if (frontFields[key] && !combinedFields[key]) combinedFields[key] = frontFields[key];
-        }
-        combinedFields.rawBadgeData = combinedRaw;
-        combinedFields.ocrSource = usedApi ? 'OCR.space' : 'Tesseract (offline)';
-        fields = combinedFields;
-        rawText = combinedRaw;
-        // Reset back side flag
-        self.isBackSide = false;
-        self.pendingFields = null;
-        self.pendingRawText = null;
-      }
-
-      // Remove overlay
       overlay.remove();
 
-      // Show what was extracted and let user confirm/edit
-      self.showExtractedData(fields, rawText);
+      if (!combinedRaw.trim()) {
+        App.toast('No text could be read from the card — please retake or enter manually', 'error');
+        self.clearPending();
+        return;
+      }
+
+      self.clearPending();
+      self.showExtractedData(fields, combinedRaw);
 
     } catch (e) {
       console.error('Card scan error:', e);
@@ -1675,6 +1680,70 @@ const CardScanner = {
     } finally {
       this.isProcessing = false;
     }
+  },
+
+  // OCR a single image via OCR.space (if key set) or offline Tesseract
+  async ocrImage(file, statusEl, progEl, index, total) {
+    var apiKey = (App.settings && App.settings.ocrApiKey) ? App.settings.ocrApiKey : '';
+    var rawText = '';
+    var usedApi = false;
+
+    if (apiKey) {
+      try {
+        statusEl.textContent = 'Uploading side ' + (index + 1) + ' to OCR.space...';
+        progEl.style.width = '30%';
+        var compressedBlob = await this.compressImage(file);
+        console.log('Card scan: compressed image size:', Math.round(compressedBlob.size / 1024), 'KB');
+        statusEl.textContent = 'Recognizing text via OCR.space...';
+        progEl.style.width = '60%';
+        var formData = new FormData();
+        formData.append('apikey', apiKey);
+        formData.append('file', compressedBlob, 'card.jpg');
+        formData.append('language', 'eng');
+        formData.append('isOverlayRequired', 'false');
+        formData.append('scale', 'true');
+        formData.append('OCREngine', '2');
+        var response = await fetch('https://api.ocr.space/parse/image', { method: 'POST', body: formData });
+        var data = await response.json();
+        console.log('OCR.space response:', data);
+        if (data && !data.IsErroredOnProcessing && data.ParsedResults && data.ParsedResults.length > 0) {
+          rawText = (data.ParsedResults[0].ParsedText || '').trim();
+          usedApi = true;
+          progEl.style.width = '100%';
+          console.log('OCR.space raw text:', rawText);
+        } else {
+          console.warn('OCR.space error:', data ? data.ErrorMessage : 'no response');
+        }
+      } catch (apiErr) {
+        console.warn('OCR.space failed, falling back to Tesseract:', apiErr.message);
+      }
+    }
+
+    if (!rawText) {
+      statusEl.textContent = 'Using offline OCR engine...';
+      if (typeof Tesseract === 'undefined') {
+        await this.loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js');
+      }
+      var processedCanvas = await this.preprocessImage(file);
+      var worker = await Tesseract.createWorker('eng', 1, {
+        logger: function(m) {
+          if (m.status === 'recognizing text') {
+            var pct = Math.round(m.progress * 100);
+            progEl.style.width = pct + '%';
+            statusEl.textContent = 'Recognizing text... ' + pct + '%';
+          } else if (m.status) {
+            statusEl.textContent = m.status + '...';
+          }
+        }
+      });
+      var psm = (Tesseract.PSM && Tesseract.PSM.SINGLE_BLOCK) ? Tesseract.PSM.SINGLE_BLOCK : '6';
+      await worker.setParameters({ tessedit_pageseg_mode: psm });
+      var result = await worker.recognize(processedCanvas);
+      await worker.terminate();
+      rawText = (result.data.text || '').trim();
+      console.log('Tesseract raw text:', rawText);
+    }
+    return { rawText: rawText, usedApi: usedApi };
   },
 
   /**
@@ -2514,61 +2583,47 @@ const CardScanner = {
     return fields;
   },
 
+  // Post-processing review: show what was extracted, then continue to the form
   showExtractedData(fields, rawText) {
     var now = new Date();
     var captureDate = now.toISOString().slice(0,10) + ' ' + now.toTimeString().slice(0,8);
     this.lastRawOCR = rawText;
-    this.pendingFields = fields;
-    this.pendingRawText = rawText;
-    this.pendingCaptureDate = captureDate;
 
-    // Show capture screen with 3 options
     var existing = document.getElementById('cardCaptureScreen');
     if (existing) existing.remove();
 
-    // Build summary of extracted data
     var summary = [];
     if (fields.name) summary.push('Name: ' + fields.name);
     if (fields.company) summary.push('Company: ' + fields.company);
     if (fields.designation) summary.push('Designation: ' + fields.designation);
     if (fields.phone) summary.push('Phone: ' + fields.phone);
     if (fields.email) summary.push('Email: ' + fields.email);
+    if (fields.website) summary.push('Website: ' + fields.website);
+    if (fields.linkedin) summary.push('LinkedIn: ' + fields.linkedin);
     if (fields.city) summary.push('City: ' + fields.city);
     var summaryHtml = summary.length > 0 ?
-      '<div style="font-size:13px;color:#aaa;margin:12px 0;max-height:150px;overflow-y:auto">' +
+      '<div style="font-size:13px;color:#aaa;margin:12px 0;max-height:180px;overflow-y:auto;text-align:left">' +
       summary.map(function(s){ return '<div style="margin-bottom:4px">✓ ' + s + '</div>'; }).join('') +
       '</div>' : '<div style="font-size:13px;color:#f99;margin:12px 0">No fields detected — you can retake or enter manually</div>';
 
-    var isBackSide = !!this.pendingRawText && this.isBackSide;
-    var sideLabel = isBackSide ? 'Back side scanned' : 'Front side scanned';
-
     var overlay = document.createElement('div');
     overlay.id = 'cardCaptureScreen';
-    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;padding:24px';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;padding:24px;overflow-y:auto';
     overlay.innerHTML =
       '<div style="font-size:40px;margin-bottom:8px">🪪</div>' +
-      '<div style="font-size:18px;font-weight:600;margin-bottom:4px">' + sideLabel + '</div>' +
+      '<div style="font-size:18px;font-weight:600;margin-bottom:4px">Card scanned</div>' +
       '<div style="font-size:13px;color:#888;margin-bottom:8px">OCR complete · ' + (fields.ocrSource || 'OCR') + '</div>' +
       summaryHtml +
       '<div style="display:flex;flex-direction:column;gap:10px;width:100%;max-width:300px">' +
-        '<button id="ccBtnRetake" style="padding:14px;border:2px solid #555;background:transparent;color:#fff;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">🔄 Retake Photo</button>' +
-        '<button id="ccBtnOtherSide" style="padding:14px;border:2px solid #0d6efd;background:transparent;color:#0d6efd;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">📷 Capture Other Side</button>' +
-        '<button id="ccBtnUse" style="padding:14px;border:none;background:#0d6efd;color:#fff;border-radius:10px;font-size:16px;font-weight:700;cursor:pointer">✅ Use Photo</button>' +
+        '<button id="ccBtnRetake" style="padding:14px;border:2px solid #555;background:transparent;color:#fff;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">🔄 Retake</button>' +
+        '<button id="ccBtnUse" style="padding:14px;border:none;background:#0d6efd;color:#fff;border-radius:10px;font-size:16px;font-weight:700;cursor:pointer">✅ Continue to Form</button>' +
       '</div>';
     document.body.appendChild(overlay);
 
     var self = this;
     document.getElementById('ccBtnRetake').onclick = function() {
       overlay.remove();
-      self.pendingFields = null;
-      self.pendingRawText = null;
       self.isBackSide = false;
-      var input = document.getElementById('cardScanInput');
-      if (input) input.click();
-    };
-    document.getElementById('ccBtnOtherSide').onclick = function() {
-      overlay.remove();
-      self.isBackSide = true;
       var input = document.getElementById('cardScanInput');
       if (input) input.click();
     };
@@ -2652,21 +2707,21 @@ const ManualForm = {
           <div class="form-group"><label>State</label><input type="text" id="f_state" value="${esc(data.state||'')}" placeholder="State"></div>
           <div class="form-group"><label>PIN / ZIP</label><input type="text" id="f_pincode" value="${esc(data.pincode||'')}" placeholder="PIN code"></div>
         </div>
-        <div class="form-group"><label>Address</label><input type="text" id="f_address" value="${esc(data.address||'')}" placeholder="Street address"></div>
+        <div class="form-group"><label>Address</label><textarea id="f_address" rows="2" placeholder="Street address" style="resize:vertical">${esc(data.address||'')}</textarea></div>
         <div class="form-group"><label>Badge ID</label><input type="text" id="f_badgeId" value="${esc(data.badgeId||'')}" placeholder="Badge ID"></div>
         <div class="field-row">
           <div class="form-group">
             <label>LinkedIn URL / ID</label>
             <div style="position:relative">
-              <input type="text" id="f_linkedin" value="${esc(data.linkedin||'')}" placeholder="linkedin.com/in/username" style="padding-right:36px" onblur="ManualForm.autoLinkedIn()">
-              <span style="position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:16px" onclick="ManualForm.autoLinkedIn()">🔍</span>
+              <textarea id="f_linkedin" rows="2" placeholder="linkedin.com/in/username" style="padding-right:36px;resize:vertical" onblur="ManualForm.autoLinkedIn()">${esc(data.linkedin||'')}</textarea>
+              <span style="position:absolute;right:8px;top:12px;cursor:pointer;font-size:16px" onclick="ManualForm.autoLinkedIn()">🔍</span>
             </div>
           </div>
           <div class="form-group">
             <label>Company Website</label>
             <div style="position:relative">
-              <input type="text" id="f_website" value="${esc(data.website||'')}" placeholder="www.company.com" style="padding-right:36px" onblur="ManualForm.autoWebsite()">
-              <span style="position:absolute;right:8px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:16px" onclick="ManualForm.autoWebsite()">🔍</span>
+              <textarea id="f_website" rows="2" placeholder="www.company.com" style="padding-right:36px;resize:vertical" onblur="ManualForm.autoWebsite()">${esc(data.website||'')}</textarea>
+              <span style="position:absolute;right:8px;top:12px;cursor:pointer;font-size:16px" onclick="ManualForm.autoWebsite()">🔍</span>
             </div>
           </div>
         </div>
@@ -3497,7 +3552,8 @@ const Admin = {
         '<div style="display:flex;justify-content:space-between;align-items:flex-start">' +
         '<div>' +
         '<div style="font-size:17px;font-weight:700">' + esc(e.name) + (isCurrent ? ' <span style="font-size:10px;background:#0d6efd;color:#fff;padding:2px 8px;border-radius:10px;margin-left:6px">ACTIVE</span>' : '') + '</div>' +
-        '<div style="font-size:13px;color:#666;margin-top:4px">' + esc(e.venue || '') + (e.date ? ' · ' + esc(e.date) : '') + '</div>' +
+        '<div style="font-size:13px;color:#666;margin-top:4px">📍 ' + esc(e.venue || '—') + '</div>' +
+        '<div style="font-size:12px;color:#999;margin-top:4px">📅 ' + esc(this.eventDateRange(e)) + '</div>' +
         '<div style="font-size:12px;color:#999;margin-top:4px">' + leadCount + ' leads saved</div>' +
         '</div>' +
         '<div style="display:flex;gap:6px">' +
@@ -3515,14 +3571,63 @@ const Admin = {
     return leads.filter(function(l){ return l.eventId === eventId || (!l.eventId && eventId === 'evt-1'); }).length;
   },
 
-  async addEvent() {
-    var name = prompt('Event name:', '');
-    if (!name || !name.trim()) return;
-    var venue = prompt('Venue / Stall:', '');
-    var date = prompt('Event date (YYYY-MM-DD):', new Date().toISOString().slice(0,10));
-    var id = 'evt-' + Date.now() + '-' + Math.random().toString(36).slice(2,8);
-    await dbPut('events', { id: id, name: name.trim(), venue: venue || '', date: date || '', active: true, created: new Date().toISOString() });
-    App.toast('Event created: ' + name, 'success');
+  eventDateRange(e) {
+    var s = e.startDate || e.date || '';
+    var en = e.endDate || '';
+    if (s && en && s !== en) return s + ' → ' + en;
+    if (s) return s;
+    if (en) return en;
+    return 'Dates not set';
+  },
+
+  showEventModal(id) {
+    const isEdit = !!id;
+    if (isEdit) {
+      dbGet('events', id).then(e => this._renderEventModal(e || {}, true));
+    } else {
+      this._renderEventModal({ name:'', venue:'', startDate:'', endDate:'' }, false);
+    }
+  },
+
+  _renderEventModal(evt, isEdit) {
+    document.getElementById('modalContent').innerHTML = `
+      <div class="modal-head">
+        <h3>${isEdit ? 'Edit Event' : 'Add Event'}</h3>
+        <button class="modal-close" onclick="Admin.closeModal()">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group"><label>Event Name *</label><input type="text" id="me_name" value="${esc(evt.name||'')}" placeholder="e.g., Electronica 2026"></div>
+        <div class="form-group"><label>Place / Venue</label><input type="text" id="me_venue" value="${esc(evt.venue||'')}" placeholder="e.g., BIEC Bengaluru, Hall 3, Stall D15"></div>
+        <div class="field-row">
+          <div class="form-group"><label>Start Date</label><input type="date" id="me_startDate" value="${esc(evt.startDate||evt.date||'')}"></div>
+          <div class="form-group"><label>End Date</label><input type="date" id="me_endDate" value="${esc(evt.endDate||'')}"></div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-outline" style="flex:1" onclick="Admin.closeModal()">Cancel</button>
+        <button class="btn btn-primary" style="flex:1" onclick="Admin.saveEvent('${evt.id||''}', ${isEdit})">Save</button>
+      </div>
+    `;
+    document.getElementById('modalOverlay').classList.add('open');
+  },
+
+  async saveEvent(id, isEdit) {
+    const name = document.getElementById('me_name').value.trim();
+    const venue = document.getElementById('me_venue').value.trim();
+    const startDate = document.getElementById('me_startDate').value;
+    const endDate = document.getElementById('me_endDate').value;
+    if (!name) { App.toast('Event name is required', 'error'); return; }
+    const existing = isEdit ? await dbGet('events', id) : null;
+    const evt = {
+      id: id || ('evt-' + Date.now() + '-' + Math.random().toString(36).slice(2,8)),
+      name, venue, startDate, endDate,
+      date: startDate || '',
+      active: true,
+      created: existing ? existing.created : new Date().toISOString()
+    };
+    await dbPut('events', evt);
+    this.closeModal();
+    App.toast(isEdit ? 'Event updated' : 'Event created: ' + name, 'success');
     this.renderEvents();
     App.populateEventSelector();
     Cloud.syncUpAdmin();
@@ -3596,7 +3701,7 @@ const Admin = {
         <div class="form-group"><label>Name</label><input type="text" id="mu_name" value="${esc(user.name||'')}" placeholder="Full name"></div>
         <div class="form-group"><label>Username</label><input type="text" id="mu_username" value="${esc(user.username||'')}" placeholder="username"></div>
         <div class="form-group"><label>Password</label><input type="text" id="mu_password" value="${esc(user.password||'')}" placeholder="password"></div>
-        <div class="form-group"><label>Role</label><select id="mu_role"><option value="salesperson" ${user.role==='salesperson'?'selected':''}>Salesperson</option><option value="admin" ${user.role==='admin'?'selected':''}>Admin</option></select></div>
+        <div class="form-group"><label>Role</label><div style="display:flex;gap:8px"><select id="mu_role" style="flex:1">${Admin.getUserRoles().map(r => `<option value="${esc(r)}" ${user.role===r?'selected':''}>${esc(r.charAt(0).toUpperCase()+r.slice(1))}</option>`).join('')}</select><button type="button" class="btn btn-outline" style="padding:8px 12px;font-size:13px;white-space:nowrap" onclick="Admin.addRoleOption()">+ Add Role</button></div></div>
         <div class="form-group"><label>Status</label><select id="mu_active"><option value="true" ${user.active?'selected':''}>Active</option><option value="false" ${!user.active?'selected':''}>Inactive</option></select></div>
       </div>
       <div class="modal-foot">
@@ -3852,6 +3957,32 @@ const Admin = {
 
   closeModal() {
     document.getElementById('modalOverlay').classList.remove('open');
+  },
+
+  getUserRoles() {
+    return (App.settings && App.settings.userRoles && App.settings.userRoles.length)
+      ? App.settings.userRoles.slice() : ['admin','salesperson'];
+  },
+
+  async addRoleOption() {
+    var name = prompt('Enter new role name:', '');
+    if (!name || !name.trim()) return;
+    name = name.trim();
+    var roles = this.getUserRoles();
+    if (roles.map(function(r){ return r.toLowerCase(); }).indexOf(name.toLowerCase()) >= 0) {
+      App.toast('Role already exists', 'error'); return;
+    }
+    roles.push(name);
+    App.settings.userRoles = roles;
+    await dbPut('settings', { key: 'app', value: App.settings });
+    var sel = document.getElementById('mu_role');
+    if (sel) {
+      var opt = document.createElement('option');
+      opt.value = name; opt.textContent = name; opt.selected = true;
+      sel.appendChild(opt);
+    }
+    App.toast('Role “' + name + '” added — it will appear in the dropdown', 'success');
+    Cloud.syncUpAdmin();
   },
 
   renderSettings() {
