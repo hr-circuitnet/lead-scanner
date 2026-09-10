@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v36';
+const APP_VERSION = 'circuitnet-v37';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -745,6 +745,51 @@ const App = {
     var lap = document.getElementById('loginAdminPass'); if (lap) lap.value = '';
   },
 
+  showProfileModal() {
+    var u = currentUser;
+    if (!u) return;
+    document.getElementById('modalContent').innerHTML = `
+      <div class="modal-head">
+        <h3>👤 My Profile</h3>
+        <button class="modal-close" onclick="Admin.closeModal()">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group"><label>Name</label><input type="text" id="mp_name" value="${esc(u.name||'')}"></div>
+        <div class="form-group"><label>Username</label><input type="text" id="mp_username" value="${esc(u.username||'')}"></div>
+        <div class="form-group"><label>New Password</label><input type="text" id="mp_password" value="${esc(u.password||'')}" placeholder="Enter new password"></div>
+        <div class="form-group"><label>Role</label><input type="text" value="${esc(u.role.charAt(0).toUpperCase()+u.role.slice(1))}" readonly style="background:#f0f0f0"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-outline" style="flex:1" onclick="Admin.closeModal()">Cancel</button>
+        <button class="btn btn-primary" style="flex:1" onclick="App.saveProfile()">Save</button>
+      </div>
+    `;
+    document.getElementById('modalOverlay').classList.add('open');
+  },
+
+  async saveProfile() {
+    var name = document.getElementById('mp_name').value.trim();
+    var username = document.getElementById('mp_username').value.trim();
+    var password = document.getElementById('mp_password').value.trim();
+    if (!name || !username || !password) { App.toast('All fields required', 'error'); return; }
+    var users = await dbGetAll('users');
+    if (users.some(function(u){ return u.username === username && u.id !== currentUser.id; })) {
+      App.toast('Username already exists', 'error'); return;
+    }
+    currentUser.name = name;
+    currentUser.username = username;
+    currentUser.password = password;
+    currentUser.updatedAt = new Date().toISOString();
+    await dbPut('users', currentUser);
+    localStorage.setItem('cn_user', JSON.stringify(currentUser));
+    Admin.closeModal();
+    document.getElementById('drawerUserName').textContent = name;
+    document.getElementById('drawerUserRole').textContent = currentUser.role === 'admin' ? 'Admin' : currentUser.role.charAt(0).toUpperCase() + currentUser.role.slice(1);
+    document.getElementById('hdrAvatar').textContent = name.charAt(0).toUpperCase();
+    App.toast('Profile updated', 'success');
+    Cloud.syncUpAdmin();
+  },
+
   showApp() {
     document.getElementById('loginScreen').style.display = 'none';
     document.getElementById('appScreen').style.display = 'block';
@@ -807,7 +852,14 @@ const App = {
     else if (view === 'scan') { Scanner.start(); }
     else if (view === 'leads') Leads.render();
     else if (view === 'manual') ManualForm.render();
-    else if (view === 'export') Export.init();
+    else if (view === 'export') {
+      if (currentUser.role !== 'admin') {
+        App.toast('Contact your admin for exporting data', 'error');
+        return;
+      }
+      Export.init();
+    }
+    else if (view === 'trash') Leads.renderTrash();
     else if (view === 'users') Admin.renderUsers();
     else if (view === 'events') Admin.renderEvents();
     else if (view === 'categories') Admin.renderCategories();
@@ -3140,6 +3192,8 @@ const Leads = {
     // Filter by current event (leads without eventId belong to default event evt-1)
     var evtId = App.currentEvent ? App.currentEvent.id : 'evt-1';
     leads = leads.filter(function(l){ return l.eventId === evtId || (!l.eventId && evtId === 'evt-1'); });
+    // Exclude trashed leads
+    leads = leads.filter(function(l){ return !l.trashed; });
     // Sort by created desc
     leads.sort((a,b) => (b.createdAt||'').localeCompare(a.createdAt||''));
 
@@ -3268,7 +3322,7 @@ const Leads = {
 
       <div class="form-actions">
         <button class="btn btn-outline" onclick="Leads.editLead('${lead.id}')">✏️ Edit</button>
-        <button class="btn btn-danger" onclick="Leads.deleteLead('${lead.id}')">🗑️ Delete</button>
+        <button class="btn btn-danger" onclick="Leads.deleteLead('${lead.id}')">🗑️ Move to Trash</button>
       </div>
     `;
     App.navigate('detail');
@@ -3315,16 +3369,101 @@ const Leads = {
   },
 
   async deleteLead(id) {
-    if (!confirm('Delete this lead permanently?')) return;
-    // Mark as deleted in cloud so other devices sync the deletion
+    if (!confirm('Move this lead to trash?')) return;
+    var lead = await dbGet('leads', id);
+    if (!lead) return;
+    lead.trashed = true;
+    lead.trashedAt = new Date().toISOString();
+    lead.updatedAt = new Date().toISOString();
+    lead.syncStatus = 'Pending';
+    await dbPut('leads', lead);
     if (navigator.onLine) {
-      try { await Cloud.update('leads', id, { deleted: true, updatedAt: new Date().toISOString() }); }
-      catch(e) { console.error('Cloud delete failed:', e); }
+      try { await Cloud.update('leads', id, { trashed: true, trashedAt: lead.trashedAt, updatedAt: lead.updatedAt }); }
+      catch(e) { console.error('Cloud update failed:', e); }
     }
-    await dbDelete('leads', id);
-    App.toast('Lead deleted', 'success');
+    App.toast('Lead moved to trash', 'success');
     App.navigate('leads');
     Leads.render();
+  },
+
+  async renderTrash() {
+    var leads = await dbGetAll('leads');
+    var evtId = App.currentEvent ? App.currentEvent.id : 'evt-1';
+    var trashed = leads.filter(function(l){ return l.trashed && (l.eventId === evtId || (!l.eventId && evtId === 'evt-1')); });
+    trashed.sort((a,b) => (b.trashedAt||'').localeCompare(a.trashedAt||''));
+    var isAdmin = currentUser.role === 'admin';
+    var container = document.getElementById('trashList');
+    if (!container) return;
+    var emptyBtn = document.getElementById('trashEmptyBtn');
+    if (emptyBtn) emptyBtn.style.display = isAdmin ? '' : 'none';
+    if (trashed.length === 0) {
+      container.innerHTML = '<div class="empty-state"><div class="es-icon">🗑️</div><p>Trash is empty. Deleted leads will appear here.</p></div>';
+      return;
+    }
+    container.innerHTML = trashed.map(function(l) {
+      return '<div class="lead-item" style="opacity:.7">' +
+        '<div class="li-top"><div>' +
+        '<div class="li-name">' + esc(l.name) + '</div>' +
+        '<div class="li-company">' + esc(l.company) + (l.designation ? ' · ' + esc(l.designation) : '') + '</div>' +
+        '</div><div class="priority-dot ' + (l.priority||'').toLowerCase() + '"></div></div>' +
+        '<div class="li-meta">' +
+        (l.priority ? '<span class="lead-tag" style="background:' + (l.priority==='Hot'?'#f8d7da':l.priority==='Warm'?'#fff3cd':'#cfe2ff') + ';color:' + (l.priority==='Hot'?'#dc3545':l.priority==='Warm'?'#fd7e14':'#0d6efd') + '">' + l.priority + '</span>' : '') +
+        '<span style="font-size:11px;color:var(--text-muted)">Trashed: ' + esc(l.trashedAt ? new Date(l.trashedAt).toLocaleDateString('en-IN') : '') + '</span>' +
+        '</div>' +
+        '<div class="form-actions" style="margin-top:8px">' +
+        '<button class="btn btn-outline" style="flex:1;padding:8px 12px;font-size:13px" onclick="Leads.restoreLead(\'' + l.id + '\')">♻️ Restore</button>' +
+        (isAdmin ? '<button class="btn btn-danger" style="flex:1;padding:8px 12px;font-size:13px" onclick="Leads.permanentlyDeleteLead(\'' + l.id + '\')">🗑️ Delete</button>' : '') +
+        '</div></div>';
+    }).join('');
+  },
+
+  async restoreLead(id) {
+    var lead = await dbGet('leads', id);
+    if (!lead) return;
+    lead.trashed = false;
+    lead.trashedAt = '';
+    lead.updatedAt = new Date().toISOString();
+    lead.syncStatus = 'Pending';
+    await dbPut('leads', lead);
+    if (navigator.onLine) {
+      try { await Cloud.update('leads', id, { trashed: false, trashedAt: '', updatedAt: lead.updatedAt }); }
+      catch(e) {}
+    }
+    App.toast('Lead restored', 'success');
+    this.renderTrash();
+  },
+
+  async permanentlyDeleteLead(id) {
+    if (!confirm('Permanently delete this lead? This cannot be undone.')) return;
+    if (navigator.onLine) {
+      try { await Cloud.update('leads', id, { deleted: true, updatedAt: new Date().toISOString() }); }
+      catch(e) {}
+    }
+    await dbDelete('leads', id);
+    App.toast('Lead permanently deleted', 'success');
+    this.renderTrash();
+  },
+
+  async emptyTrash() {
+    if (currentUser.role !== 'admin') { App.toast('Only admin can empty trash', 'error'); return; }
+    var leads = await dbGetAll('leads');
+    var trashed = leads.filter(function(l){ return l.trashed; });
+    if (trashed.length === 0) { App.toast('Trash is already empty', 'info'); return; }
+    if (!confirm('Permanently delete all ' + trashed.length + ' leads in trash? This cannot be undone.')) return;
+    if (navigator.onLine) {
+      var now = new Date().toISOString();
+      for (var i = 0; i < trashed.length; i++) {
+        try { await Cloud.update('leads', trashed[i].id, { deleted: true, updatedAt: now }); } catch(e){}
+      }
+    }
+    for (var i = 0; i < trashed.length; i++) await dbDelete('leads', trashed[i].id);
+    App.toast('Trash emptied', 'success');
+    this.renderTrash();
+  },
+
+  scrollFilters(dir) {
+    var container = document.getElementById('filterChips');
+    if (container) container.scrollBy({ left: dir * 200, behavior: 'smooth' });
   }
 };
 
@@ -3335,6 +3474,7 @@ const Dashboard = {
     // Filter by current event (leads without eventId belong to default event evt-1)
     var evtId = App.currentEvent ? App.currentEvent.id : 'evt-1';
     var leads = allLeads.filter(function(l){ return l.eventId === evtId || (!l.eventId && evtId === 'evt-1'); });
+    leads = leads.filter(function(l){ return !l.trashed; });
     const today = App.dateStr(new Date());
 
     document.getElementById('dashGreeting').textContent = `Hello, ${currentUser.name}`;
@@ -3456,6 +3596,7 @@ const Export = {
     // Filter by current event
     var evtId = App.currentEvent ? App.currentEvent.id : 'evt-1';
     leads = leads.filter(function(l){ return l.eventId === evtId || (!l.eventId && evtId === 'evt-1'); });
+    leads = leads.filter(l => !l.trashed);
     if (p) leads = leads.filter(l => l.priority === p);
     if (i) leads = leads.filter(l => l.interest === i);
     if (s) leads = leads.filter(l => l.salesperson === s);
@@ -3661,7 +3802,7 @@ const Admin = {
       <div class="user-card">
         <div class="uc-info">
           <h4>${esc(u.name)} ${u.active ? '' : '<span style="color:var(--danger);font-size:12px">(Inactive)</span>'}</h4>
-          <p>${esc(u.username)} · ${esc(u.role)}</p>
+          <p>${esc(u.username)} · ${esc(u.role)}${currentUser && currentUser.role === 'admin' ? ' · 🔑 ' + esc(u.password||'') : ''}</p>
         </div>
         <div style="display:flex;gap:8px;align-items:center">
           <div class="uc-role ${u.role}">${esc(u.role)}</div>
@@ -3695,7 +3836,7 @@ const Admin = {
       <div class="modal-body">
         <div class="form-group"><label>Name</label><input type="text" id="mu_name" value="${esc(user.name||'')}" placeholder="Full name"></div>
         <div class="form-group"><label>Username</label><input type="text" id="mu_username" value="${esc(user.username||'')}" placeholder="username"></div>
-        <div class="form-group"><label>Password</label><input type="text" id="mu_password" value="${esc(user.password||'')}" placeholder="password"></div>
+        <div class="form-group"><label>Password</label><div style="display:flex;gap:8px"><input type="text" id="mu_password" value="${esc(user.password||'')}" placeholder="password" style="flex:1"><button type="button" class="btn btn-outline" style="padding:8px 12px;font-size:13px;white-space:nowrap" onclick="Admin.resetPassword()">🔄 Reset</button></div></div>
         <div class="form-group"><label>Role</label><div style="display:flex;gap:8px"><select id="mu_role" style="flex:1">${Admin.getUserRoles().map(r => `<option value="${esc(r)}" ${user.role===r?'selected':''}>${esc(r.charAt(0).toUpperCase()+r.slice(1))}</option>`).join('')}</select><button type="button" class="btn btn-outline" style="padding:8px 12px;font-size:13px;white-space:nowrap" onclick="Admin.addRoleOption()">+ Add Role</button></div></div>
         <div class="form-group"><label>Status</label><select id="mu_active"><option value="true" ${user.active?'selected':''}>Active</option><option value="false" ${!user.active?'selected':''}>Inactive</option></select></div>
       </div>
@@ -3738,6 +3879,13 @@ const Admin = {
     App.toast('User deleted', 'success');
     this.renderUsers();
     App.populateLoginUsers();
+  },
+
+  resetPassword() {
+    var newPass = 'pass' + Math.floor(Math.random() * 9000 + 1000);
+    var el = document.getElementById('mu_password');
+    if (el) { el.value = newPass; el.focus(); }
+    App.toast('Password generated: ' + newPass + ' — click Save to apply', 'success');
   },
 
   /* ===== TEAM SYNC: Export / Import users + categories + settings ===== */

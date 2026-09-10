@@ -189,6 +189,8 @@ a{text-decoration:none;color:inherit}
 .filter-chips::-webkit-scrollbar{display:none}
 .filter-chip{padding:7px 14px;border-radius:20px;background:#fff;border:1px solid var(--border);font-size:12px;font-weight:600;color:var(--text-muted);white-space:nowrap;flex-shrink:0}
 .filter-chip.active{background:var(--primary);color:#fff;border-color:var(--primary)}
+.filter-scroll-btn{flex-shrink:0;width:32px;height:32px;border:1px solid var(--border);border-radius:50%;background:#fff;color:var(--text);font-size:18px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s}
+.filter-scroll-btn:active{background:var(--primary);color:#fff;border-color:var(--primary)}
 .lead-item{background:#fff;border-radius:var(--radius);padding:14px;margin-bottom:10px;box-shadow:0 1px 4px rgba(0,0,0,.05);transition:.1s}
 .lead-item:active{transform:scale(.98)}
 .lead-item .li-top{display:flex;justify-content:space-between;align-items:flex-start}
@@ -372,14 +374,15 @@ a{text-decoration:none;color:inherit}
       <div class="drawer-item" onclick="App.navigate('manual')"><span class="di-icon">✍️</span> Manual Entry</div>
       <div class="drawer-item" onclick="document.getElementById('cardScanInput').click()"><span class="di-icon">🪪</span> Scan Visiting Card</div>
       <div class="drawer-item" onclick="App.navigate('leads')"><span class="di-icon">📋</span> View Leads</div>
-      <div class="drawer-item" onclick="App.navigate('export')"><span class="di-icon">📤</span> Export</div>
+      <div class="drawer-item" onclick="App.showProfileModal()"><span class="di-icon">👤</span> My Profile</div>
+      <div class="drawer-item admin-only" onclick="App.navigate('export')"><span class="di-icon">📤</span> Export</div>
+      <div class="drawer-item" onclick="App.navigate('trash')"><span class="di-icon">🗑️</span> Trash</div>
       <div class="drawer-divider"></div>
       <div class="drawer-item admin-only" onclick="App.navigate('events')"><span class="di-icon">🎪</span> Event Management</div>
       <div class="drawer-item admin-only" onclick="App.navigate('users')"><span class="di-icon">👥</span> User Management</div>
       <div class="drawer-item admin-only" onclick="App.navigate('categories')"><span class="di-icon">🏷️</span> Interest Categories</div>
       <div class="drawer-item admin-only" onclick="App.navigate('settings')"><span class="di-icon">⚙️</span> Settings</div>
       <div class="drawer-divider admin-only"></div>
-      <div class="drawer-item" onclick="App.loadDemoData()"><span class="di-icon">🧪</span> Load Demo Data</div>
       <div class="drawer-item" onclick="App.checkForUpdates()" id="drawerCheckUpdate"><span class="di-icon">🔄</span> Check for Updates</div>
       <div class="drawer-item danger" onclick="App.logout()"><span class="di-icon">🚪</span> Logout</div>
     </div>
@@ -404,7 +407,7 @@ a{text-decoration:none;color:inherit}
       <div class="action-btn scan" onclick="App.navigate('scan')"><span class="ab-icon">📷</span>SCAN BADGE</div>
       <div class="action-btn manual" onclick="App.navigate('manual')"><span class="ab-icon">✍️</span>MANUAL ENTRY</div>
       <div class="action-btn leads" onclick="App.navigate('leads')"><span class="ab-icon">📋</span>VIEW LEADS</div>
-      <div class="action-btn export" onclick="App.navigate('export')"><span class="ab-icon">📤</span>EXPORT</div>
+      <div class="action-btn export admin-only" onclick="App.navigate('export')"><span class="ab-icon">📤</span>EXPORT</div>
     </div>
     <div class="dash-section">
       <h3>Leads by Priority</h3>
@@ -445,7 +448,11 @@ a{text-decoration:none;color:inherit}
     <div class="search-bar">
       <input type="text" id="searchInput" placeholder="🔍 Search name, company, phone, email..." oninput="Leads.render()">
     </div>
-    <div class="filter-chips" id="filterChips"></div>
+    <div style="display:flex;align-items:center;gap:4px">
+      <button class="filter-scroll-btn" onclick="Leads.scrollFilters(-1)">‹</button>
+      <div class="filter-chips" id="filterChips" style="flex:1"></div>
+      <button class="filter-scroll-btn" onclick="Leads.scrollFilters(1)">›</button>
+    </div>
     <div id="leadsList"></div>
   </div>
 
@@ -456,6 +463,15 @@ a{text-decoration:none;color:inherit}
       <h2 style="flex:1">Lead Details</h2>
     </div>
     <div id="detailContainer"></div>
+  </div>
+
+  <!-- ===== TRASH ===== -->
+  <div class="view" id="view-trash">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <h2>🗑️ Trash</h2>
+      <button id="trashEmptyBtn" class="btn btn-danger" style="padding:8px 14px;font-size:13px" onclick="Leads.emptyTrash()">🗑️ Empty Trash</button>
+    </div>
+    <div id="trashList"></div>
   </div>
 
   <!-- ===== EXPORT ===== -->
@@ -558,7 +574,6 @@ a{text-decoration:none;color:inherit}
       <h3>Data Management</h3>
       <button class="btn btn-outline" style="width:100%;margin-bottom:10px;background:#e8f0fe;border-color:var(--primary);font-weight:600" onclick="App.navigate('datasync')">☁️ Data Sync & Debug</button>
       <button class="btn btn-outline" style="width:100%;margin-bottom:10px" onclick="App.syncNow()">🔄 Sync Now</button>
-      <button class="btn btn-outline" style="width:100%;margin-bottom:10px" onclick="App.loadDemoData()">🧪 Load Demo Data</button>
       <button class="btn btn-danger" style="width:100%" onclick="App.clearAllData()">🗑️ Clear All Data</button>
     </div>
     <div class="form-card">
