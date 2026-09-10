@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v40';
+const APP_VERSION = 'circuitnet-v41';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -534,9 +534,11 @@ const App = {
     await this.seedDefaults();
     await this.loadSettings();
     await this.populateLoginUsers();
-    this.updateEventDisplay(); // Set event name on login page
+    this.updateEventDisplay();
     this.initOnlineDetection();
     this.initServiceWorker();
+    // Pre-warm camera permission on first load so browser remembers it
+    this.initCameraPermission();
     // Sync with cloud on startup (push local pending, pull cloud data)
     Cloud.sync();
     Cloud.startPolling();
@@ -545,6 +547,21 @@ const App = {
     if (saved) {
       currentUser = JSON.parse(saved);
       this.showApp();
+    }
+  },
+
+  async initCameraPermission() {
+    // If we already warmed up the permission, skip
+    if (localStorage.getItem('cn_camera_ok')) return;
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+      var stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      stream.getTracks().forEach(function(t) { t.stop(); });
+      localStorage.setItem('cn_camera_ok', '1');
+      console.log('Camera permission pre-warmed');
+    } catch(e) {
+      // Permission denied or no camera — will prompt again when scanner is used
+      console.log('Camera pre-warm skipped:', e.message);
     }
   },
 
@@ -588,6 +605,7 @@ const App = {
     localStorage.removeItem('cn_user');
     localStorage.removeItem('cn_current_event');
     localStorage.removeItem('cn_app_version');
+    localStorage.removeItem('cn_camera_ok');
     // 4. Do NOT set cn_app_version here — on reload, the fresh app.js
     //    will have the new APP_VERSION, and checkVersion() will record it
     //    as a first-install. This prevents an infinite reload loop.
@@ -810,7 +828,8 @@ const App = {
     if (!confirm('Logout? Unsynced data is safely stored.')) return;
     localStorage.removeItem('cn_user');
     currentUser = null;
-    if (html5QrCode) { try { html5QrCode.stop(); } catch(e){} html5QrCode = null; }
+    if (html5QrCode) { try { html5QrCode.stop(); } catch(e){} }
+    if (Scanner.scanning) Scanner.scanning = false;
     document.getElementById('appScreen').style.display = 'none';
     document.getElementById('loginScreen').style.display = 'flex';
     var lp = document.getElementById('loginPass'); if (lp) lp.value = '';
@@ -934,6 +953,11 @@ const App = {
   },
 
   async navigate(view) {
+    // Block export access for users without permission — BEFORE switching view
+    if (view === 'export' && currentUser && currentUser.role !== 'admin' && !currentUser.canExport) {
+      App.toast('Contact your admin for exporting data', 'error');
+      return;
+    }
     // Stop scanner if leaving scan view — but keep the instance alive
     // so the browser doesn't re-ask for camera permission next time.
     // We only stop the camera STREAM (frees the hardware), not the object.
@@ -957,10 +981,6 @@ const App = {
     else if (view === 'leads') Leads.render();
     else if (view === 'manual') ManualForm.render();
     else if (view === 'export') {
-      if (currentUser.role !== 'admin' && !currentUser.canExport) {
-        App.toast('Contact your admin for exporting data', 'error');
-        return;
-      }
       Export.init();
     }
     else if (view === 'trash') Leads.renderTrash();

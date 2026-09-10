@@ -433,7 +433,8 @@ a{text-decoration:none;color:inherit}
 
   <!-- ===== SCAN ===== -->
   <div class="view" id="view-scan">
-    <div id="scannerContainer">
+    <div id="scannerContainer" style="position:relative">
+      <button id="scanCloseBtn" onclick="Scanner.stop(); App.navigate('dashboard');" style="position:absolute;top:8px;right:8px;z-index:10;width:36px;height:36px;border-radius:50%;border:none;background:rgba(0,0,0,.6);color:#fff;font-size:20px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1">&times;</button>
       <div id="qrReader"></div>
       <div class="scan-frame" id="scanFrame" style="display:none"></div>
     </div>
