@@ -363,9 +363,13 @@ a{text-decoration:none;color:inherit}
         <div class="dh-role" id="drawerUserRole">Salesperson</div>
       </div>
     </div>
-    <div style="padding:12px 20px 4px;border-bottom:1px solid #eee">
+    <div id="eventSelectorWrap" style="padding:12px 20px 4px;border-bottom:1px solid #eee">
       <label style="font-size:11px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.5px">Current Event</label>
-      <select id="eventSelector" onchange="App.setCurrentEvent(this.value)" style="width:100%;padding:10px 12px;border:2px solid var(--border);border-radius:8px;background:#fff;font-size:14px;margin-top:6px;margin-bottom:8px"></select>
+      <select id="eventSelector" onchange="App.setDefaultEvent(this.value)" style="width:100%;padding:10px 12px;border:2px solid var(--border);border-radius:8px;background:#fff;font-size:14px;margin-top:6px;margin-bottom:8px"></select>
+    </div>
+    <div id="eventDisplayWrap" style="padding:12px 20px 4px;border-bottom:1px solid #eee;display:none">
+      <label style="font-size:11px;font-weight:700;color:#666;text-transform:uppercase;letter-spacing:.5px">Current Event</label>
+      <div id="eventDisplayText" style="width:100%;padding:10px 12px;border:2px solid var(--border);border-radius:8px;background:#f8f9fa;font-size:14px;margin-top:6px;margin-bottom:8px;font-weight:600"></div>
     </div>
     <div class="drawer-menu">
       <div class="drawer-item active" onclick="App.navigate('dashboard')"><span class="di-icon">📊</span> Dashboard</div>
@@ -375,7 +379,7 @@ a{text-decoration:none;color:inherit}
       <div class="drawer-item" onclick="document.getElementById('cardScanInput').click()"><span class="di-icon">🪪</span> Scan Visiting Card</div>
       <div class="drawer-item" onclick="App.navigate('leads')"><span class="di-icon">📋</span> View Leads</div>
       <div class="drawer-item" onclick="App.showProfileModal()"><span class="di-icon">👤</span> My Profile</div>
-      <div class="drawer-item admin-only" onclick="App.navigate('export')"><span class="di-icon">📤</span> Export</div>
+      <div class="drawer-item" onclick="App.navigate('export')"><span class="di-icon">📤</span> Export</div>
       <div class="drawer-item" onclick="App.navigate('trash')"><span class="di-icon">🗑️</span> Trash</div>
       <div class="drawer-divider"></div>
       <div class="drawer-item admin-only" onclick="App.navigate('events')"><span class="di-icon">🎪</span> Event Management</div>
@@ -407,7 +411,7 @@ a{text-decoration:none;color:inherit}
       <div class="action-btn scan" onclick="App.navigate('scan')"><span class="ab-icon">📷</span>SCAN BADGE</div>
       <div class="action-btn manual" onclick="App.navigate('manual')"><span class="ab-icon">✍️</span>MANUAL ENTRY</div>
       <div class="action-btn leads" onclick="App.navigate('leads')"><span class="ab-icon">📋</span>VIEW LEADS</div>
-      <div class="action-btn export admin-only" onclick="App.navigate('export')"><span class="ab-icon">📤</span>EXPORT</div>
+      <div class="action-btn export" onclick="App.navigate('export')"><span class="ab-icon">📤</span>EXPORT</div>
     </div>
     <div class="dash-section">
       <h3>Leads by Priority</h3>

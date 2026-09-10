@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v37';
+const APP_VERSION = 'circuitnet-v40';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -405,38 +405,60 @@ const Cloud = {
       }
     } catch (e) { this.log('❌ syncDown leads: ' + e.message); }
 
-    // === USERS ===
+    // === USERS (skip deleted IDs) ===
     try {
       var cloudUsers = await this.fetchAll('users');
-      for (var i = 0; i < cloudUsers.length; i++) await dbPut('users', cloudUsers[i]);
+      var deletedUserIds = App.settings.deletedUserIds || [];
+      for (var i = 0; i < cloudUsers.length; i++) {
+        if (deletedUserIds.indexOf(cloudUsers[i].id) < 0) await dbPut('users', cloudUsers[i]);
+      }
       this.log('syncDown: ' + cloudUsers.length + ' users');
     } catch (e) { this.log('❌ syncDown users: ' + e.message); }
 
-    // === CATEGORIES (dedup by name to prevent duplicates from multi-phone sync) ===
+    // === CATEGORIES (skip deleted names, dedup by name) ===
     try {
       var cloudCats = await this.fetchAll('categories');
       var localCats = await dbGetAll('categories');
       var seenNames = {};
       for (var i = 0; i < localCats.length; i++) seenNames[localCats[i].name.toLowerCase()] = true;
+      var deletedCatNames = (App.settings.deletedCategoryNames || []).map(function(n){ return n.toLowerCase(); });
       var added = 0;
       for (var i = 0; i < cloudCats.length; i++) {
         var cn = (cloudCats[i].name || '').toLowerCase();
-        if (cn && !seenNames[cn]) {
+        if (cn && !seenNames[cn] && deletedCatNames.indexOf(cn) < 0) {
           await dbPut('categories', cloudCats[i]);
           seenNames[cn] = true;
           added++;
         }
       }
       this.log('syncDown: ' + cloudCats.length + ' categories from cloud, ' + added + ' new added');
-      // Clean up any duplicates after sync
       await App.dedupCategories();
     } catch (e) { this.log('❌ syncDown cats: ' + e.message); }
 
-    // === EVENTS ===
+    // === EVENTS (add from cloud + dedup by name + skip deleted) ===
     try {
       var cloudEvents = await this.fetchAll('events');
-      for (var i = 0; i < cloudEvents.length; i++) await dbPut('events', cloudEvents[i]);
-      this.log('syncDown: ' + cloudEvents.length + ' events');
+      var deletedEventNames = (App.settings.deletedEventNames || []).map(function(n){ return n.toLowerCase(); });
+      for (var i = 0; i < cloudEvents.length; i++) {
+        var en = (cloudEvents[i].name || '').toLowerCase();
+        if (en && deletedEventNames.indexOf(en) < 0) {
+          await dbPut('events', cloudEvents[i]);
+        }
+      }
+      // Dedup local events by name (keep first, delete rest)
+      var allEvents = await dbGetAll('events');
+      var seenEv = {};
+      for (var i = 0; i < allEvents.length; i++) {
+        var ek = (allEvents[i].name || '').toLowerCase();
+        if (deletedEventNames.indexOf(ek) >= 0) {
+          await dbDelete('events', allEvents[i].id);
+        } else if (seenEv[ek]) {
+          await dbDelete('events', allEvents[i].id);
+        } else {
+          seenEv[ek] = true;
+        }
+      }
+      this.log('syncDown: ' + cloudEvents.length + ' events from cloud');
     } catch (e) { this.log('❌ syncDown events: ' + e.message); }
 
     // === SETTINGS (uses 'key' column, not 'id') ===
@@ -444,6 +466,22 @@ const Cloud = {
       var cloudSettings = await this.fetchAll('settings', 'key');
       for (var i = 0; i < cloudSettings.length; i++) await dbPut('settings', cloudSettings[i]);
       this.log('syncDown: ' + cloudSettings.length + ' settings');
+      // If admin set a default event, apply it for non-admin users
+      if (typeof currentUser !== 'undefined' && currentUser && currentUser.role !== 'admin') {
+        var sRow = await dbGet('settings', 'app');
+        if (sRow && sRow.value && sRow.value.defaultEventId) {
+          var defEvt = await dbGet('events', sRow.value.defaultEventId);
+          if (defEvt) {
+            App.currentEvent = { id: defEvt.id, name: defEvt.name };
+            localStorage.setItem('cn_current_event', JSON.stringify(App.currentEvent));
+            App.updateEventDisplay();
+            var dispEl = document.getElementById('eventDisplayText');
+            if (dispEl) dispEl.textContent = defEvt.name;
+            Dashboard.render();
+            Leads.render();
+          }
+        }
+      }
     } catch (e) { this.log('❌ syncDown settings: ' + e.message); }
   },
 
@@ -456,6 +494,9 @@ const Cloud = {
     this.log('Sync started...');
     try {
       await this.syncUpLeads();
+      if (typeof currentUser !== 'undefined' && currentUser && currentUser.role === 'admin') {
+        await this.syncUpAdmin();
+      }
       await this.syncDown();
       this.log('Sync complete.');
     } catch (e) {
@@ -558,10 +599,10 @@ const App = {
     // Seed admin user
     const users = await dbGetAll('users');
     if (users.length === 0) {
-      await dbPut('users', { id: 'u-admin', name: 'CircuitNet', username: 'admin', password: 'admin123', role: 'admin', active: true, created: new Date().toISOString() });
-      await dbPut('users', { id: 'u-sales1', name: 'Rajesh Kumar', username: 'rajesh', password: 'pass123', role: 'salesperson', active: true, created: new Date().toISOString() });
-      await dbPut('users', { id: 'u-sales2', name: 'Priya Sharma', username: 'priya', password: 'pass123', role: 'salesperson', active: true, created: new Date().toISOString() });
-      await dbPut('users', { id: 'u-sales3', name: 'Arun Menon', username: 'arun', password: 'pass123', role: 'salesperson', active: true, created: new Date().toISOString() });
+      await dbPut('users', { id: 'u-admin', name: 'CircuitNet', username: 'admin', password: 'admin123', role: 'admin', active: true, canExport: true, created: new Date().toISOString() });
+      await dbPut('users', { id: 'u-sales1', name: 'Rajesh Kumar', username: 'rajesh', password: 'pass123', role: 'salesperson', active: true, canExport: false, created: new Date().toISOString() });
+      await dbPut('users', { id: 'u-sales2', name: 'Priya Sharma', username: 'priya', password: 'pass123', role: 'salesperson', active: true, canExport: false, created: new Date().toISOString() });
+      await dbPut('users', { id: 'u-sales3', name: 'Arun Menon', username: 'arun', password: 'pass123', role: 'salesperson', active: true, canExport: false, created: new Date().toISOString() });
     }
     // Seed default categories ONLY on first install (when the store is empty).
     // We intentionally do NOT re-add categories the admin has deleted, so
@@ -615,14 +656,27 @@ const App = {
     if (!App.settings.userRoles) App.settings.userRoles = ['admin','salesperson'];
     // Ensure OCR key is set (default if not already in settings)
     if (!App.settings.ocrApiKey) App.settings.ocrApiKey = 'K88604395188957';
-    // Load current event from localStorage (persists across sessions)
+    // Load current event from localStorage or settings.defaultEventId
     var savedEvent = localStorage.getItem('cn_current_event');
     if (savedEvent) {
       App.currentEvent = JSON.parse(savedEvent);
     } else {
-      // Default to first event
       var events = await dbGetAll('events');
-      if (events.length > 0) {
+      // If admin set a default event, use it
+      if (App.settings.defaultEventId) {
+        var defEvt = null;
+        for (var i = 0; i < events.length; i++) {
+          if (events[i].id === App.settings.defaultEventId) { defEvt = events[i]; break; }
+        }
+        if (defEvt) {
+          App.currentEvent = { id: defEvt.id, name: defEvt.name };
+        } else if (events.length > 0) {
+          App.currentEvent = { id: events[0].id, name: events[0].name };
+        } else {
+          App.currentEvent = { id: 'evt-1', name: 'Electronica 2026' };
+        }
+        localStorage.setItem('cn_current_event', JSON.stringify(App.currentEvent));
+      } else if (events.length > 0) {
         App.currentEvent = { id: events[0].id, name: events[0].name };
         localStorage.setItem('cn_current_event', JSON.stringify(App.currentEvent));
       } else {
@@ -637,13 +691,31 @@ const App = {
     App.currentEvent = { id: evt.id, name: evt.name };
     localStorage.setItem('cn_current_event', JSON.stringify(App.currentEvent));
     App.updateEventDisplay();
-    // Update the event selector UI
     var sel = document.getElementById('eventSelector');
     if (sel) sel.value = eventId;
-    // Refresh dashboard and leads
+    var dispEl = document.getElementById('eventDisplayText');
+    if (dispEl) dispEl.textContent = evt.name;
     Dashboard.render();
     Leads.render();
     App.toast('Event: ' + evt.name, 'success');
+  },
+
+  async setDefaultEvent(eventId) {
+    var evt = await dbGet('events', eventId);
+    if (!evt) return;
+    App.currentEvent = { id: evt.id, name: evt.name };
+    localStorage.setItem('cn_current_event', JSON.stringify(App.currentEvent));
+    App.settings.defaultEventId = eventId;
+    await dbPut('settings', { key: 'app', value: App.settings });
+    App.updateEventDisplay();
+    var sel = document.getElementById('eventSelector');
+    if (sel) sel.value = eventId;
+    var dispEl = document.getElementById('eventDisplayText');
+    if (dispEl) dispEl.textContent = evt.name;
+    Dashboard.render();
+    Leads.render();
+    App.toast('Default event set: ' + evt.name, 'success');
+    Cloud.syncUpAdmin();
   },
 
   async populateEventSelector() {
@@ -801,13 +873,24 @@ const App = {
     adminItems.forEach(el => el.style.display = currentUser.role === 'admin' ? '' : 'none');
     // Update dynamic event name in drawer
     this.updateEventDisplay();
-    // Update version in drawer
     var vEl = document.getElementById('drawerVersion');
     if (vEl) vEl.textContent = 'Version: ' + APP_VERSION;
+    // Event selector: admin gets dropdown, non-admin gets read-only display
+    var evSelWrap = document.getElementById('eventSelectorWrap');
+    var evDispWrap = document.getElementById('eventDisplayWrap');
+    if (currentUser.role === 'admin') {
+      if (evSelWrap) evSelWrap.style.display = '';
+      if (evDispWrap) evDispWrap.style.display = 'none';
+      this.populateEventSelector();
+    } else {
+      if (evSelWrap) evSelWrap.style.display = 'none';
+      if (evDispWrap) evDispWrap.style.display = '';
+      var dispEl = document.getElementById('eventDisplayText');
+      if (dispEl) dispEl.textContent = (App.currentEvent && App.currentEvent.name) ? App.currentEvent.name : (App.settings.eventName || 'Electronica 2026');
+    }
     this.navigate('dashboard');
     Dashboard.render();
     this.updateSyncBadge();
-    this.populateEventSelector();
   },
 
   updateEventDisplay() {
@@ -827,6 +910,27 @@ const App = {
     // Parse newline-separated text into array
     var arr = val.split('\n').map(function(s){ return s.trim(); }).filter(function(s){ return s.length > 0; });
     return arr.length > 0 ? arr : null;
+  },
+
+  getPriorities() {
+    return App.getDropdownOptions('priorities') || DEFAULT_PRIORITIES;
+  },
+
+  priorityColor(priority) {
+    var pr = App.getPriorities();
+    var idx = pr.indexOf(priority);
+    var colors = ['var(--hot)', 'var(--warm)', 'var(--cold)'];
+    if (idx >= 0 && idx < 3) return colors[idx];
+    return '#adb5bd';
+  },
+
+  priorityStyle(priority) {
+    var pr = App.getPriorities();
+    var idx = pr.indexOf(priority);
+    var bgs = ['#f8d7da', '#fff3cd', '#cfe2ff'];
+    var fgs = ['#dc3545', '#fd7e14', '#0d6efd'];
+    if (idx >= 0 && idx < 3) return 'background:' + bgs[idx] + ';color:' + fgs[idx];
+    return 'background:#e2e3e5;color:#6c757d';
   },
 
   async navigate(view) {
@@ -853,7 +957,7 @@ const App = {
     else if (view === 'leads') Leads.render();
     else if (view === 'manual') ManualForm.render();
     else if (view === 'export') {
-      if (currentUser.role !== 'admin') {
+      if (currentUser.role !== 'admin' && !currentUser.canExport) {
         App.toast('Contact your admin for exporting data', 'error');
         return;
       }
@@ -2807,9 +2911,11 @@ const ManualForm = {
         <div class="form-group">
           <label>Priority</label>
           <div class="chip-group priority-chips">
-            <button class="chip hot ${data.priority==='Hot'?'active':''}" onclick="ManualForm.selectChip(this,'f_priority','Hot')">🔥 Hot</button>
-            <button class="chip warm ${data.priority==='Warm'?'active':''}" onclick="ManualForm.selectChip(this,'f_priority','Warm')">☀️ Warm</button>
-            <button class="chip cold ${data.priority==='Cold'?'active':''}" onclick="ManualForm.selectChip(this,'f_priority','Cold')">❄️ Cold</button>
+            ${App.getPriorities().map((p, i) => {
+              var cls = i === 0 ? 'hot' : i === 1 ? 'warm' : i === 2 ? 'cold' : '';
+              var emoji = i === 0 ? '🔥' : i === 1 ? '☀️' : i === 2 ? '❄️' : '📌';
+              return `<button class="chip ${cls} ${data.priority===p?'active':''}" onclick="ManualForm.selectChip(this,'f_priority','${esc(p)}')">${emoji} ${esc(p)}</button>`;
+            }).join('')}
           </div>
           <input type="hidden" id="f_priority" value="${esc(data.priority||'')}">
         </div>
@@ -3143,7 +3249,8 @@ const Leads = {
 
     // Render filter chips
     let chipsHtml = '<div class="filter-chip ' + (this.currentFilter === '' ? 'active' : '') + '" onclick="Leads.setFilter(\'\')">All</div>';
-    ['Hot','Warm','Cold'].forEach(p => {
+    var priList = App.getPriorities();
+    priList.forEach(p => {
       chipsHtml += `<div class="filter-chip ${this.currentFilter==='priority:'+p?'active':''}" onclick="Leads.setFilter('priority:${p}')">${p}</div>`;
     });
     chipsHtml += `<div class="filter-chip ${this.currentFilter==='followup'?'active':''}" onclick="Leads.setFilter('followup')">📞 Follow-up</div>`;
@@ -3172,10 +3279,10 @@ const Leads = {
             <div class="li-name">${esc(l.name)}</div>
             <div class="li-company">${esc(l.company)}${l.designation ? ' · ' + esc(l.designation) : ''}</div>
           </div>
-          <div class="priority-dot ${(l.priority||'').toLowerCase()}"></div>
+          <div class="priority-dot" style="background:${App.priorityColor(l.priority)}"></div>
         </div>
         <div class="li-meta">
-          ${l.priority ? `<span class="lead-tag" style="background:${l.priority==='Hot'?'#f8d7da':l.priority==='Warm'?'#fff3cd':'#cfe2ff'};color:${l.priority==='Hot'?'#dc3545':l.priority==='Warm'?'#fd7e14':'#0d6efd'}">${l.priority}</span>` : ''}
+          ${l.priority ? `<span class="lead-tag" style="${App.priorityStyle(l.priority)}">${l.priority}</span>` : ''}
           ${l.interest ? `<span class="lead-tag interest">${esc(l.interest)}</span>` : ''}
           <span class="lead-tag sync ${(l.syncStatus||'pending').toLowerCase()}">${l.syncStatus||'Pending'}</span>
         </div>
@@ -3248,7 +3355,7 @@ const Leads = {
             <h3>${esc(lead.name)}</h3>
             <p>${esc(lead.company)}${lead.designation ? ' · ' + esc(lead.designation) : ''}${lead.department ? ' · ' + esc(lead.department) : ''}</p>
           </div>
-          ${lead.priority ? `<span class="lead-tag" style="background:${lead.priority==='Hot'?'#f8d7da':lead.priority==='Warm'?'#fff3cd':'#cfe2ff'};color:${lead.priority==='Hot'?'#dc3545':lead.priority==='Warm'?'#fd7e14':'#0d6efd'};font-size:13px;padding:4px 12px">${lead.priority}</span>` : ''}
+          ${lead.priority ? `<span class="lead-tag" style="${App.priorityStyle(lead.priority)};font-size:13px;padding:4px 12px">${lead.priority}</span>` : ''}
         </div>
         <div class="action-row">
           <div class="action-circle" onclick="Leads.callLead('${esc(lead.phone||'')}')"><div class="ac-icon call">📞</div>Call</div>
@@ -3405,9 +3512,9 @@ const Leads = {
         '<div class="li-top"><div>' +
         '<div class="li-name">' + esc(l.name) + '</div>' +
         '<div class="li-company">' + esc(l.company) + (l.designation ? ' · ' + esc(l.designation) : '') + '</div>' +
-        '</div><div class="priority-dot ' + (l.priority||'').toLowerCase() + '"></div></div>' +
+        '</div><div class="priority-dot" style="background:' + App.priorityColor(l.priority) + '"></div></div>' +
         '<div class="li-meta">' +
-        (l.priority ? '<span class="lead-tag" style="background:' + (l.priority==='Hot'?'#f8d7da':l.priority==='Warm'?'#fff3cd':'#cfe2ff') + ';color:' + (l.priority==='Hot'?'#dc3545':l.priority==='Warm'?'#fd7e14':'#0d6efd') + '">' + l.priority + '</span>' : '') +
+        (l.priority ? '<span class="lead-tag" style="' + App.priorityStyle(l.priority) + '">' + l.priority + '</span>' : '') +
         '<span style="font-size:11px;color:var(--text-muted)">Trashed: ' + esc(l.trashedAt ? new Date(l.trashedAt).toLocaleDateString('en-IN') : '') + '</span>' +
         '</div>' +
         '<div class="form-actions" style="margin-top:8px">' +
@@ -3481,9 +3588,17 @@ const Dashboard = {
     document.getElementById('dashDate').textContent = new Date().toLocaleDateString('en-IN', { weekday:'long', day:'numeric', month:'long', year:'numeric' });
 
     document.getElementById('statTotal').textContent = leads.length;
-    document.getElementById('statHot').textContent = leads.filter(l => l.priority === 'Hot').length;
-    document.getElementById('statWarm').textContent = leads.filter(l => l.priority === 'Warm').length;
-    document.getElementById('statCold').textContent = leads.filter(l => l.priority === 'Cold').length;
+    var priList = App.getPriorities();
+    var p0 = priList[0] || 'Hot', p1 = priList[1] || 'Warm', p2 = priList[2] || 'Cold';
+    var hotLbl = document.querySelector('.stat-card.hot .stat-label');
+    var warmLbl = document.querySelector('.stat-card.warm .stat-label');
+    var coldLbl = document.querySelector('.stat-card.cold .stat-label');
+    if (hotLbl) hotLbl.textContent = p0;
+    if (warmLbl) warmLbl.textContent = p1;
+    if (coldLbl) coldLbl.textContent = p2;
+    document.getElementById('statHot').textContent = leads.filter(l => l.priority === p0).length;
+    document.getElementById('statWarm').textContent = leads.filter(l => l.priority === p1).length;
+    document.getElementById('statCold').textContent = leads.filter(l => l.priority === p2).length;
     document.getElementById('statToday').textContent = leads.filter(l => l.date === today).length;
     document.getElementById('statFollowup').textContent = leads.filter(l => l.followUp === 'Yes').length;
 
@@ -3494,14 +3609,17 @@ const Dashboard = {
   },
 
   renderPriorityChart(leads) {
-    const counts = { Hot:0, Warm:0, Cold:0 };
-    leads.forEach(l => { if (l.priority) counts[l.priority] = (counts[l.priority]||0)+1; });
-    const max = Math.max(...Object.values(counts), 1);
+    var pr = App.getPriorities();
+    var counts = {};
+    pr.forEach(function(p){ counts[p] = 0; });
+    leads.forEach(function(l){ if (l.priority) counts[l.priority] = (counts[l.priority]||0)+1; });
+    var max = Math.max.apply(null, Object.values(counts).concat([1]));
+    var colors = ['var(--hot)', 'var(--warm)', 'var(--cold)'];
     const container = document.getElementById('priorityChart');
-    container.innerHTML = Object.entries(counts).map(([k,v]) => `
+    container.innerHTML = Object.entries(counts).map(([k,v], i) => `
       <div class="bar-row">
         <div class="bar-label">${k}</div>
-        <div class="bar-track"><div class="bar-fill b-${k.toLowerCase()}" style="width:${(v/max*100)}%">${v}</div></div>
+        <div class="bar-track"><div class="bar-fill" style="width:${(v/max*100)}%;background:${colors[i]||'var(--primary)'}">${v}</div></div>
       </div>
     `).join('');
   },
@@ -3607,11 +3725,13 @@ const Export = {
 
   async updateSummary() {
     const leads = await this.getFiltered();
+    var pr = App.getPriorities();
+    var prRows = pr.slice(0, 3).map(function(p) {
+      return '<div class="detail-row"><span class="dr-label">' + esc(p) + '</span><span class="dr-value">' + leads.filter(function(l){ return l.priority === p; }).length + '</span></div>';
+    }).join('');
     document.getElementById('exportSummary').innerHTML = `
       <div class="detail-row"><span class="dr-label">Total leads to export</span><span class="dr-value">${leads.length}</span></div>
-      <div class="detail-row"><span class="dr-label">Hot</span><span class="dr-value">${leads.filter(l=>l.priority==='Hot').length}</span></div>
-      <div class="detail-row"><span class="dr-label">Warm</span><span class="dr-value">${leads.filter(l=>l.priority==='Warm').length}</span></div>
-      <div class="detail-row"><span class="dr-label">Cold</span><span class="dr-value">${leads.filter(l=>l.priority==='Cold').length}</span></div>
+      ${prRows}
       <div class="detail-row"><span class="dr-label">Follow-ups</span><span class="dr-value">${leads.filter(l=>l.followUp==='Yes').length}</span></div>
     `;
   },
@@ -3776,13 +3896,29 @@ const Admin = {
     } else {
       if (!confirm('Delete this event?')) return;
     }
+    var evtData = await dbGet('events', id);
+    if (evtData && evtData.name) {
+      if (!App.settings.deletedEventNames) App.settings.deletedEventNames = [];
+      if (App.settings.deletedEventNames.indexOf(evtData.name) < 0) App.settings.deletedEventNames.push(evtData.name);
+      await dbPut('settings', { key: 'app', value: App.settings });
+    }
     await dbDelete('events', id);
-    if (navigator.onLine) { try { await Cloud.deleteRow('events', id); } catch(e){} }
+    if (navigator.onLine) { try { await Cloud.deleteRow('events', id); } catch(e){ console.error('Cloud delete event:', e); } }
     // If current event was deleted, switch to first available
     if (App.currentEvent && App.currentEvent.id === id) {
       var events = await dbGetAll('events');
       if (events.length > 0) {
         await App.setCurrentEvent(events[0].id);
+      }
+    }
+    // If deleted event was the default, pick a new one
+    if (App.settings.defaultEventId === id) {
+      var remaining = await dbGetAll('events');
+      if (remaining.length > 0) {
+        await this.setDefaultEvent(remaining[0].id);
+      } else {
+        delete App.settings.defaultEventId;
+        await dbPut('settings', { key: 'app', value: App.settings });
       }
     }
     App.toast('Event deleted', 'success');
@@ -3802,7 +3938,7 @@ const Admin = {
       <div class="user-card">
         <div class="uc-info">
           <h4>${esc(u.name)} ${u.active ? '' : '<span style="color:var(--danger);font-size:12px">(Inactive)</span>'}</h4>
-          <p>${esc(u.username)} · ${esc(u.role)}${currentUser && currentUser.role === 'admin' ? ' · 🔑 ' + esc(u.password||'') : ''}</p>
+          <p>${esc(u.username)} · ${esc(u.role)}${currentUser && currentUser.role === 'admin' ? ' · 🔑 ' + esc(u.password||'') : ''}${u.canExport && u.role !== 'admin' ? ' · 📤 Export' : ''}</p>
         </div>
         <div style="display:flex;gap:8px;align-items:center">
           <div class="uc-role ${u.role}">${esc(u.role)}</div>
@@ -3837,8 +3973,9 @@ const Admin = {
         <div class="form-group"><label>Name</label><input type="text" id="mu_name" value="${esc(user.name||'')}" placeholder="Full name"></div>
         <div class="form-group"><label>Username</label><input type="text" id="mu_username" value="${esc(user.username||'')}" placeholder="username"></div>
         <div class="form-group"><label>Password</label><div style="display:flex;gap:8px"><input type="text" id="mu_password" value="${esc(user.password||'')}" placeholder="password" style="flex:1"><button type="button" class="btn btn-outline" style="padding:8px 12px;font-size:13px;white-space:nowrap" onclick="Admin.resetPassword()">🔄 Reset</button></div></div>
-        <div class="form-group"><label>Role</label><div style="display:flex;gap:8px"><select id="mu_role" style="flex:1">${Admin.getUserRoles().map(r => `<option value="${esc(r)}" ${user.role===r?'selected':''}>${esc(r.charAt(0).toUpperCase()+r.slice(1))}</option>`).join('')}</select><button type="button" class="btn btn-outline" style="padding:8px 12px;font-size:13px;white-space:nowrap" onclick="Admin.addRoleOption()">+ Add Role</button></div></div>
+        <div class="form-group"><label>Role</label><div style="display:flex;gap:8px"><select id="mu_role" style="flex:1">${Admin.getUserRoles().map(r => `<option value="${esc(r)}" ${user.role===r?'selected':''}>${esc(r.charAt(0).toUpperCase()+r.slice(1))}</option>`).join('')}</select><button type="button" class="btn btn-outline" style="padding:8px 12px;font-size:13px;white-space:nowrap" onclick="Admin.addRoleOption()">+ Add</button><button type="button" class="btn btn-outline" style="padding:8px 12px;font-size:13px;white-space:nowrap" onclick="Admin.deleteRoleOption()">🗑️</button></div></div>
         <div class="form-group"><label>Status</label><select id="mu_active"><option value="true" ${user.active?'selected':''}>Active</option><option value="false" ${!user.active?'selected':''}>Inactive</option></select></div>
+        <div class="form-group"><label>Allow Export</label><select id="mu_canExport"><option value="false" ${!user.canExport?'selected':''}>No</option><option value="true" ${user.canExport?'selected':''}>Yes</option></select></div>
       </div>
       <div class="modal-foot">
         <button class="btn btn-outline" style="flex:1" onclick="Admin.closeModal()">Cancel</button>
@@ -3854,13 +3991,14 @@ const Admin = {
     const password = document.getElementById('mu_password').value.trim();
     const role = document.getElementById('mu_role').value;
     const active = document.getElementById('mu_active').value === 'true';
+    const canExport = document.getElementById('mu_canExport') ? document.getElementById('mu_canExport').value === 'true' : false;
     if (!name || !username || !password) { App.toast('All fields required', 'error'); return; }
     // Check username uniqueness
     const users = await dbGetAll('users');
     if (users.some(u => u.username === username && u.id !== id)) { App.toast('Username already exists', 'error'); return; }
     const user = {
       id: id || ('u-' + Date.now() + '-' + Math.random().toString(36).slice(2,6)),
-      name, username, password, role, active,
+      name, username, password, role, active, canExport,
       created: isEdit ? (await dbGet('users', id)).created : new Date().toISOString()
     };
     await dbPut('users', user);
@@ -3874,8 +4012,11 @@ const Admin = {
   async deleteUser(id) {
     const u = await dbGet('users', id);
     if (!confirm(`Delete user "${u.name}"?`)) return;
+    if (!App.settings.deletedUserIds) App.settings.deletedUserIds = [];
+    if (App.settings.deletedUserIds.indexOf(id) < 0) App.settings.deletedUserIds.push(id);
+    await dbPut('settings', { key: 'app', value: App.settings });
     await dbDelete('users', id);
-    if (navigator.onLine) { try { await Cloud.deleteRow('users', id); } catch(e){} }
+    if (navigator.onLine) { try { await Cloud.deleteRow('users', id); } catch(e){ console.error('Cloud delete user:', e); } }
     App.toast('User deleted', 'success');
     this.renderUsers();
     App.populateLoginUsers();
@@ -4082,6 +4223,10 @@ const Admin = {
       id: id || ('cat-' + Date.now() + '-' + Math.random().toString(36).slice(2,6)),
       name, active
     };
+    if (App.settings.deletedCategoryNames) {
+      App.settings.deletedCategoryNames = App.settings.deletedCategoryNames.filter(function(n){ return n !== name; });
+      await dbPut('settings', { key: 'app', value: App.settings });
+    }
     await dbPut('categories', cat);
     this.closeModal();
     App.toast('Category saved', 'success');
@@ -4092,10 +4237,14 @@ const Admin = {
   async deleteCategory(id) {
     const c = await dbGet('categories', id);
     if (!confirm(`Delete category "${c.name}"?`)) return;
+    if (!App.settings.deletedCategoryNames) App.settings.deletedCategoryNames = [];
+    if (c.name && App.settings.deletedCategoryNames.indexOf(c.name) < 0) App.settings.deletedCategoryNames.push(c.name);
     await dbDelete('categories', id);
-    if (navigator.onLine) { try { await Cloud.deleteRow('categories', id); } catch(e){} }
+    if (navigator.onLine) { try { await Cloud.deleteRow('categories', id); } catch(e){ console.error('Cloud delete category:', e); } }
+    await dbPut('settings', { key: 'app', value: App.settings });
     App.toast('Category deleted', 'success');
     this.renderCategories();
+    Cloud.syncUpAdmin();
   },
 
   closeModal() {
@@ -4125,6 +4274,21 @@ const Admin = {
       sel.appendChild(opt);
     }
     App.toast('Role “' + name + '” added — it will appear in the dropdown', 'success');
+    Cloud.syncUpAdmin();
+  },
+
+  async deleteRoleOption() {
+    var sel = document.getElementById('mu_role');
+    if (!sel || sel.selectedIndex < 0) { App.toast('Select a role to delete', 'error'); return; }
+    var role = sel.value;
+    if (role === 'admin' || role === 'salesperson') { App.toast('Cannot delete default roles', 'error'); return; }
+    if (!confirm('Delete role "' + role + '"?')) return;
+    var roles = this.getUserRoles();
+    roles = roles.filter(function(r){ return r !== role; });
+    App.settings.userRoles = roles;
+    await dbPut('settings', { key: 'app', value: App.settings });
+    sel.remove(sel.selectedIndex);
+    App.toast('Role deleted', 'success');
     Cloud.syncUpAdmin();
   },
 
@@ -4167,13 +4331,11 @@ const Admin = {
 
   async saveSettings() {
     var ocrEl = document.getElementById('setOcrKey');
-    App.settings = {
-      companyName: document.getElementById('setCompanyName').value,
-      eventName: document.getElementById('setEventName').value,
-      venue: document.getElementById('setVenue').value,
-      leadSource: document.getElementById('setLeadSource').value,
-      ocrApiKey: ocrEl ? ocrEl.value.trim() : (App.settings.ocrApiKey || '')
-    };
+    App.settings.companyName = document.getElementById('setCompanyName').value;
+    App.settings.eventName = document.getElementById('setEventName').value;
+    App.settings.venue = document.getElementById('setVenue').value;
+    App.settings.leadSource = document.getElementById('setLeadSource').value;
+    App.settings.ocrApiKey = ocrEl ? ocrEl.value.trim() : (App.settings.ocrApiKey || '');
     await dbPut('settings', { key: 'app', value: App.settings });
     App.toast('Settings saved', 'success');
     Cloud.syncUpAdmin();
