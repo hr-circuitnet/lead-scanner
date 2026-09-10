@@ -1547,8 +1547,6 @@ const CardScanner = {
   scan(file) {
     if (!file) return;
     App.toggleDrawer(false);
-    // Store the captured image WITHOUT processing it yet. The preview screen
-    // lets the user Retake / Take Other Side / Finish before any OCR runs.
     var url = URL.createObjectURL(file);
     if (this.isBackSide) {
       if (this.pendingFiles[1] && this.pendingFiles[1].url) { try { URL.revokeObjectURL(this.pendingFiles[1].url); } catch(e){} }
@@ -1567,7 +1565,6 @@ const CardScanner = {
     this.pendingFiles = [];
   },
 
-  // Pre-processing preview: Retake / Take Other Side / Finish
   showCapturePreview() {
     var self = this;
     var existing = document.getElementById('cardCaptureScreen');
@@ -1626,7 +1623,6 @@ const CardScanner = {
     };
   },
 
-  // Run OCR on the captured image(s), combine the text, then show results
   async processImages(files) {
     if (this.isProcessing) return;
     this.isProcessing = true;
@@ -1682,7 +1678,6 @@ const CardScanner = {
     }
   },
 
-  // OCR a single image via OCR.space (if key set) or offline Tesseract
   async ocrImage(file, statusEl, progEl, index, total) {
     var apiKey = (App.settings && App.settings.ocrApiKey) ? App.settings.ocrApiKey : '';
     var rawText = '';

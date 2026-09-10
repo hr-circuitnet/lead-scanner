@@ -318,8 +318,6 @@ a{text-decoration:none;color:inherit}
     </div>
     <button class="btn btn-primary btn-large" onclick="App.doLogin()">Login</button>
     <div class="login-error" id="loginError"></div>
-    <input type="file" id="loginImportFile" accept=".json" style="display:none" onchange="Admin.importTeamConfig(this.files[0], true); this.value='';">
-    <button class="btn btn-outline" style="width:100%;margin-top:10px;font-size:13px" onclick="document.getElementById('loginImportFile').click()">📥 Import Team Config (get users from admin)</button>
     <div class="login-footer">Login is saved on this phone. Use ☰ → Logout to switch users.</div>
   </div>
 </div>
