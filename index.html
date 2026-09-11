@@ -344,7 +344,7 @@ a{text-decoration:none;color:inherit}
     </div>
   </div>
   <div class="app-subbar">Lead Scanner</div>
-  <input type="file" id="scanFileInput" accept="image/*" style="display:none" onchange="Scanner.scanFromFile(this.files[0]); this.value='';">
+  <input type="file" id="scanFileInput" accept="image/*" style="display:none" onchange="CardScanner.scanFromFile(this.files[0]); this.value='';">
   <input type="file" id="cardScanInput" accept="image/*" capture="environment" style="display:none" onchange="CardScanner.scan(this.files[0]); this.value='';">
 
   <!-- Sync banner -->

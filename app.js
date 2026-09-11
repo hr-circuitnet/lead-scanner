@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v41';
+const APP_VERSION = 'circuitnet-v42';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -1719,10 +1719,29 @@ const CardScanner = {
   // Captured card images awaiting the user's choice (front, and optionally back)
   pendingFiles: [],
   isBackSide: false,
+  fromGallery: false,
 
-  scan(file) {
+  async scanFromFile(file) {
     if (!file) return;
     App.toggleDrawer(false);
+    // Stop live camera scanner if running (scanFile can conflict with it)
+    if (Scanner.scanning) { try { await Scanner.stop(); } catch(e){} }
+    // First try QR/barcode decode (fast, offline) — badge images still work
+    try {
+      var ts = html5QrCode || new Html5Qrcode('qrReader');
+      var qrResult = await ts.scanFile(file, false);
+      await Scanner.onScan(qrResult);
+      return;
+    } catch(e) {
+      // No QR/barcode found — treat as a visiting card photo
+    }
+    this.scan(file, true);
+  },
+
+  scan(file, fromGallery) {
+    if (!file) return;
+    App.toggleDrawer(false);
+    this.fromGallery = !!fromGallery;
     var url = URL.createObjectURL(file);
     if (this.isBackSide) {
       if (this.pendingFiles[1] && this.pendingFiles[1].url) { try { URL.revokeObjectURL(this.pendingFiles[1].url); } catch(e){} }
@@ -1755,6 +1774,9 @@ const CardScanner = {
     if (front) previewHtml += '<div style="font-size:11px;color:#888;margin-bottom:4px">FRONT</div><img src="' + front.url + '" style="max-width:100%;max-height:30vh;border-radius:10px;margin-bottom:10px;border:2px solid #333;object-fit:contain">';
     if (back) previewHtml += '<div style="font-size:11px;color:#888;margin-bottom:4px">BACK</div><img src="' + back.url + '" style="max-width:100%;max-height:30vh;border-radius:10px;margin-bottom:10px;border:2px solid #333;object-fit:contain">';
 
+    var pickMode = this.fromGallery;
+    var retakeLabel = pickMode ? '🔄 Choose Again' : '🔄 Retake';
+    var otherSideLabel = pickMode ? '🖼️ Add Other Side' : '📷 Take Other Side';
     var overlay = document.createElement('div');
     overlay.id = 'cardCaptureScreen';
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.94);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;padding:20px;overflow-y:auto';
@@ -1764,8 +1786,8 @@ const CardScanner = {
       '<div style="font-size:12px;color:#888;margin-bottom:10px">Review the photo. Tap “Finish” to process it, or capture the other side.</div>' +
       '<div style="width:100%;max-width:340px">' + previewHtml + '</div>' +
       '<div style="display:flex;flex-direction:column;gap:10px;width:100%;max-width:340px;margin-top:6px">' +
-        '<button id="ccBtnRetake" style="padding:14px;border:2px solid #555;background:transparent;color:#fff;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">🔄 Retake' + (hasBack ? ' Back' : '') + '</button>' +
-        (hasBack ? '' : '<button id="ccBtnOtherSide" style="padding:14px;border:2px solid #0d6efd;background:transparent;color:#0d6efd;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">📷 Take Other Side</button>') +
+        '<button id="ccBtnRetake" style="padding:14px;border:2px solid #555;background:transparent;color:#fff;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">' + retakeLabel + (hasBack && !pickMode ? ' Back' : '') + '</button>' +
+        (hasBack ? '' : '<button id="ccBtnOtherSide" style="padding:14px;border:2px solid #0d6efd;background:transparent;color:#0d6efd;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">' + otherSideLabel + '</button>') +
         '<button id="ccBtnFinish" style="padding:14px;border:none;background:#0d6efd;color:#fff;border-radius:10px;font-size:16px;font-weight:700;cursor:pointer">✅ Finish</button>' +
       '</div>';
     document.body.appendChild(overlay);
@@ -1780,14 +1802,14 @@ const CardScanner = {
         self.clearPending();
         self.isBackSide = false;
       }
-      var input = document.getElementById('cardScanInput');
+      var input = document.getElementById(self.fromGallery ? 'scanFileInput' : 'cardScanInput');
       if (input) input.click();
     };
     if (!hasBack) {
       document.getElementById('ccBtnOtherSide').onclick = function() {
         overlay.remove();
         self.isBackSide = true;
-        var input = document.getElementById('cardScanInput');
+        var input = document.getElementById(self.fromGallery ? 'scanFileInput' : 'cardScanInput');
         if (input) input.click();
       };
     }
@@ -2786,7 +2808,7 @@ const CardScanner = {
       '<div style="font-size:13px;color:#888;margin-bottom:8px">OCR complete · ' + (fields.ocrSource || 'OCR') + '</div>' +
       summaryHtml +
       '<div style="display:flex;flex-direction:column;gap:10px;width:100%;max-width:300px">' +
-        '<button id="ccBtnRetake" style="padding:14px;border:2px solid #555;background:transparent;color:#fff;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">🔄 Retake</button>' +
+        '<button id="ccBtnRetake" style="padding:14px;border:2px solid #555;background:transparent;color:#fff;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer">' + (this.fromGallery ? '🔄 Choose Again' : '🔄 Retake') + '</button>' +
         '<button id="ccBtnUse" style="padding:14px;border:none;background:#0d6efd;color:#fff;border-radius:10px;font-size:16px;font-weight:700;cursor:pointer">✅ Continue to Form</button>' +
       '</div>';
     document.body.appendChild(overlay);
@@ -2795,7 +2817,7 @@ const CardScanner = {
     document.getElementById('ccBtnRetake').onclick = function() {
       overlay.remove();
       self.isBackSide = false;
-      var input = document.getElementById('cardScanInput');
+      var input = document.getElementById(self.fromGallery ? 'scanFileInput' : 'cardScanInput');
       if (input) input.click();
     };
     document.getElementById('ccBtnUse').onclick = function() {
