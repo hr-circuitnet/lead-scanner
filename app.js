@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v49';
+const APP_VERSION = 'circuitnet-v50';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -1076,7 +1076,7 @@ const App = {
     // Keep a history state so the browser Back button stays inside the app
     try { window.history.pushState({ cnApp: true }, ''); } catch(e) {}
     document.getElementById('drawerUserName').textContent = currentUser.name;
-    document.getElementById('drawerUserRole').textContent = currentUser.role === 'admin' ? 'Admin' : 'Salesperson';
+    document.getElementById('drawerUserRole').textContent = currentUser.role.replace(/\b\w/g, function(c){ return c.toUpperCase(); });
     document.getElementById('hdrAvatar').textContent = currentUser.name.charAt(0).toUpperCase();
     // Show/hide admin items
     const adminItems = document.querySelectorAll('.admin-only');
