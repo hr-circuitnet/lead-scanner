@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v46';
+const APP_VERSION = 'circuitnet-v47';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -142,6 +142,32 @@ const Cloud = {
   isSyncing: false,
   pollTimer: null,
 
+  /** Serialized queue — every sync job runs one at a time. This kills the
+   *  push/pull races where syncUpAdmin from one caller interleaved with a
+   *  poll-driven sync() from another and reverted fresh changes. */
+  enqueue(job) {
+    var run = this._queue.then(job, job);
+    this._queue = run.then(function(){}, function(){});
+    return run;
+  },
+  _queue: Promise.resolve(),
+
+  /** fetch with a hard timeout so a stalled network can never freeze
+   *  isSyncing and kill the polling loop. */
+  fetchT(url, opts, timeoutMs) {
+    var ms = timeoutMs || 20000;
+    if (!window.AbortController) return fetch(url, opts);
+    return new Promise(function(resolve, reject) {
+      var ctrl = new AbortController();
+      var t = setTimeout(function() { ctrl.abort(); }, ms);
+      opts = opts || {};
+      opts.signal = ctrl.signal;
+      fetch(url, opts).then(
+        function(r) { clearTimeout(t); resolve(r); },
+        function(e) { clearTimeout(t); reject(e && e.name === 'AbortError' ? new Error('Request timed out: ' + url) : e); });
+    });
+  },
+
   log(msg) {
     var ts = new Date().toLocaleTimeString();
     var line = '[' + ts + '] ' + msg;
@@ -159,7 +185,7 @@ const Cloud = {
   async testGet() {
     this.log('Testing GET /leads...');
     try {
-      var resp = await fetch(SB_REST + '/leads?select=id,name&limit=5', {
+      var resp = await this.fetchT(SB_REST + '/leads?select=id,name&limit=5', {
         headers: sbHeaders()
       });
       var body = await resp.text();
@@ -184,7 +210,7 @@ const Cloud = {
     var lowerLead = toLowerKeys(testLead);
     this.log('Body (lowercase keys): ' + JSON.stringify(lowerLead).substring(0, 300));
     try {
-      var resp = await fetch(SB_REST + '/leads', {
+      var resp = await this.fetchT(SB_REST + '/leads', {
         method: 'POST',
         headers: { 'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json' },
         body: JSON.stringify(lowerLead)
@@ -194,7 +220,7 @@ const Cloud = {
       this.log('POST body: ' + body.substring(0, 500));
       if (resp.ok) {
         this.log('✅ INSERT WORKS! Cleaning up...');
-        await fetch(SB_REST + '/leads?id=eq.' + testLead.id, {
+        await this.fetchT(SB_REST + '/leads?id=eq.' + testLead.id, {
           method: 'DELETE',
           headers: { 'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY }
         });
@@ -224,7 +250,7 @@ const Cloud = {
 
   async fetchAll(table, orderCol) {
     var col = orderCol || 'id';
-    var resp = await fetch(SB_REST + '/' + table + '?order=' + col, {
+    var resp = await this.fetchT(SB_REST + '/' + table + '?order=' + col, {
       headers: sbHeaders()
     });
     if (!resp.ok) {
@@ -250,7 +276,7 @@ const Cloud = {
     // Try full payload first
     var maxRetries = 10;
     for (var attempt = 0; attempt <= maxRetries; attempt++) {
-      var resp = await fetch(SB_REST + '/' + table + '?on_conflict=' + col, {
+      var resp = await this.fetchT(SB_REST + '/' + table + '?on_conflict=' + col, {
         method: 'POST',
         headers: sbHeaders({ 'Prefer': 'resolution=merge-duplicates' }),
         body: JSON.stringify(payload)
@@ -284,7 +310,7 @@ const Cloud = {
     // Retry loop for missing columns
     var maxRetries = 10;
     for (var attempt = 0; attempt <= maxRetries; attempt++) {
-      var resp = await fetch(SB_REST + '/' + table + '?on_conflict=' + col, {
+      var resp = await this.fetchT(SB_REST + '/' + table + '?on_conflict=' + col, {
         method: 'POST',
         headers: sbHeaders({ 'Prefer': 'resolution=merge-duplicates' }),
         body: JSON.stringify(lowerRows)
@@ -303,7 +329,7 @@ const Cloud = {
   },
 
   async update(table, id, patch) {
-    var resp = await fetch(SB_REST + '/' + table + '?id=eq.' + encodeURIComponent(id), {
+    var resp = await this.fetchT(SB_REST + '/' + table + '?id=eq.' + encodeURIComponent(id), {
       method: 'PATCH',
       headers: sbHeaders({ 'Prefer': 'return=minimal' }),
       body: JSON.stringify(toLowerKeys(patch))
@@ -316,7 +342,7 @@ const Cloud = {
   },
 
   async deleteRow(table, id) {
-    var resp = await fetch(SB_REST + '/' + table + '?id=eq.' + encodeURIComponent(id), {
+    var resp = await this.fetchT(SB_REST + '/' + table + '?id=eq.' + encodeURIComponent(id), {
       method: 'DELETE',
       headers: sbHeaders()
     });
@@ -331,7 +357,12 @@ const Cloud = {
    * Push pending leads to Supabase (fast — only leads that changed).
    * Called on every 15-second poll.
    */
-  async syncUpLeads() {
+  syncUpLeads() {
+    var self = this;
+    return self.enqueue(function() { return self._workSyncUpLeads(); });
+  },
+
+  async _workSyncUpLeads() {
     var leads = await dbGetAll('leads');
     var pendingLeads = leads.filter(function(l) { return l.syncStatus === 'Pending' || l.syncStatus === 'Failed' || !l.syncStatus; });
     if (pendingLeads.length > 0) {
@@ -360,9 +391,16 @@ const Cloud = {
    * Push admin data (users, categories, events, settings) to Supabase.
    * Only called when admin makes changes — NOT on every poll.
    */
-  async syncUpAdmin() {
-    var users = await dbGetAll('users');
-    if (users.length > 0) await this.upsertBatch('users', users).catch(function(e){ console.error('Sync users:', e); });
+  syncUpAdmin() {
+    var self = this;
+    return self.enqueue(function() { return self._workSyncUpAdmin(); });
+  },
+
+  async _workSyncUpAdmin() {
+    // NOTE: users are NOT mass-pushed here. A stale device pushing its full
+    // local users list every 15s was overwriting fresh role/permission
+    // changes made on another device. Each user is pushed individually via
+    // syncUpUser() at the moment it is saved.
     // Never push categories on the deleted-names list — pushing them would
     // resurrect deleted categories in the cloud and on every other device
     var delCatNames = (App.settings.deletedCategoryNames || []).map(function(n){ return n.toLowerCase(); });
@@ -376,7 +414,13 @@ const Cloud = {
     if (settings.length > 0) await this.upsertBatch('settings', settings, 'key').catch(function(e){ console.error('Sync settings:', e); });
   },
 
-  async syncUpUser(user) {
+  syncUpUser(user) {
+    var self = this;
+    var u = user;
+    return self.enqueue(function() { return self._workSyncUpUser(u); });
+  },
+
+  async _workSyncUpUser(user) {
     try {
       await this.upsert('users', user);
       this.log('syncUpUser: pushed user ' + user.username);
@@ -393,32 +437,55 @@ const Cloud = {
    * - For leads: merge by comparing updatedAt (cloud wins if newer, unless local is Pending)
    * - For users/categories/events/settings: full replace (cloud is authoritative)
    */
-  async syncDown() {
+  async _workSyncDown() {
     this.log('syncDown: fetching from cloud...');
 
-    // === LEADS ===
+    // === LEADS (cloud-authoritative for synced leads; tombstones for
+    // permanent deletes; trash state propagated via settings blob) ===
     try {
       var cloudLeads = await this.fetchAll('leads');
       this.log('syncDown: got ' + cloudLeads.length + ' leads from cloud');
       var localLeads = await dbGetAll('leads');
       var localMap = {};
       for (var i = 0; i < localLeads.length; i++) localMap[localLeads[i].id] = localLeads[i];
+      var deletedLeadIds = App.settings.deletedLeadIds || [];
+      var trashedLeadIds = App.settings.trashedLeadIds || [];
+      // Apply trash state from the settings tombstone (schema-independent)
+      for (var i = 0; i < localLeads.length; i++) {
+        var tl = localLeads[i];
+        if (!tl.trashed && trashedLeadIds.indexOf(tl.id) >= 0) {
+          tl.trashed = true;
+          tl.trashedAt = tl.trashedAt || new Date().toISOString();
+          await dbPut('leads', tl);
+        }
+      }
       for (var i = 0; i < cloudLeads.length; i++) {
         var cl = cloudLeads[i];
-        var local = localMap[cl.id];
-        if (cl.deleted) {
-          if (local) await dbDelete('leads', cl.id);
+        if (deletedLeadIds.indexOf(cl.id) >= 0) {
+          // Tombstoned — purge from the cloud so it can't resurrect
+          try { await this.deleteRow('leads', cl.id); } catch(e2) {}
           continue;
         }
+        if (cl.deleted) {
+          if (localMap[cl.id]) await dbDelete('leads', cl.id);
+          continue;
+        }
+        var local = localMap[cl.id];
         if (!local) {
+          // New from another device — add it
           await dbPut('leads', cl);
         } else if (local.syncStatus === 'Pending' || local.syncStatus === 'Failed') {
-          // Keep local
+          // Keep local — it gets pushed on the next sync-up
         } else {
-          var cloudUpdated = cl.updatedAt || cl.createdAt || '';
-          var localUpdated = local.updatedAt || local.createdAt || '';
-          if (cloudUpdated > localUpdated) await dbPut('leads', cl);
+          // Already synced: accept the cloud version. Our own push ran
+          // before this pull, so accepting cloud is what makes edits
+          // converge across devices (no timestamp column required).
+          await dbPut('leads', cl);
         }
+      }
+      // Remove tombstoned leads locally
+      for (var i = 0; i < deletedLeadIds.length; i++) {
+        if (localMap[deletedLeadIds[i]]) await dbDelete('leads', deletedLeadIds[i]);
       }
     } catch (e) { this.log('❌ syncDown leads: ' + e.message); }
 
@@ -516,7 +583,7 @@ const Cloud = {
       }
       this.log('syncDown: ' + cloudSettings.length + ' settings');
       // If admin set a default event, apply it for non-admin users
-      if (typeof currentUser !== 'undefined' && currentUser && currentUser.role !== 'admin') {
+      if (typeof currentUser !== 'undefined' && currentUser) {
         var sRow = await dbGet('settings', 'app');
         if (sRow && sRow.value && sRow.value.defaultEventId) {
           var defEvt = await dbGet('events', sRow.value.defaultEventId);
@@ -537,16 +604,21 @@ const Cloud = {
   /**
    * Full sync: push local changes, then pull cloud changes.
    */
-  async sync() {
+  sync() {
+    var self = this;
+    return self.enqueue(function() { return self._workSync(); });
+  },
+
+  async _workSync() {
     if (this.isSyncing) return;
     this.isSyncing = true;
     this.log('Sync started...');
     try {
-      await this.syncUpLeads();
+      await this._workSyncUpLeads();
       if (typeof currentUser !== 'undefined' && currentUser && currentUser.role === 'admin') {
-        await this.syncUpAdmin();
+        await this._workSyncUpAdmin();
       }
-      await this.syncDown();
+      await this._workSyncDown();
       this.log('Sync complete.');
     } catch (e) {
       this.log('❌ Sync error: ' + e.message);
@@ -3754,11 +3826,17 @@ const Leads = {
     lead.trashed = true;
     lead.trashedAt = new Date().toISOString();
     lead.updatedAt = new Date().toISOString();
-    lead.syncStatus = 'Pending';
+    lead.syncStatus = 'Synced';
+    lead.syncedAt = new Date().toISOString();
     await dbPut('leads', lead);
+    // Tombstone the trash state in settings (propagates even if the leads
+    // table lacks a 'trashed' column)
+    if (!App.settings.trashedLeadIds) App.settings.trashedLeadIds = [];
+    if (App.settings.trashedLeadIds.indexOf(id) < 0) App.settings.trashedLeadIds.push(id);
+    await App.touchAndSaveSettings();
     if (navigator.onLine) {
-      try { await Cloud.update('leads', id, { trashed: true, trashedAt: lead.trashedAt, updatedAt: lead.updatedAt }); }
-      catch(e) { console.error('Cloud update failed:', e); }
+      try { await Cloud.upsert('leads', lead); }
+      catch(e) { console.error('Cloud push failed:', e); }
     }
     App.toast('Lead moved to trash', 'success');
     App.navigate('leads');
@@ -3802,10 +3880,15 @@ const Leads = {
     lead.trashed = false;
     lead.trashedAt = '';
     lead.updatedAt = new Date().toISOString();
-    lead.syncStatus = 'Pending';
+    lead.syncStatus = 'Synced';
+    lead.syncedAt = new Date().toISOString();
     await dbPut('leads', lead);
+    if (App.settings.trashedLeadIds) {
+      App.settings.trashedLeadIds = App.settings.trashedLeadIds.filter(function(tid){ return tid !== id; });
+      await App.touchAndSaveSettings();
+    }
     if (navigator.onLine) {
-      try { await Cloud.update('leads', id, { trashed: false, trashedAt: '', updatedAt: lead.updatedAt }); }
+      try { await Cloud.upsert('leads', lead); }
       catch(e) {}
     }
     App.toast('Lead restored', 'success');
@@ -3814,10 +3897,13 @@ const Leads = {
 
   async permanentlyDeleteLead(id) {
     if (!confirm('Permanently delete this lead? This cannot be undone.')) return;
-    if (navigator.onLine) {
-      try { await Cloud.update('leads', id, { deleted: true, updatedAt: new Date().toISOString() }); }
-      catch(e) {}
-    }
+    // Tombstone so every device deletes it (and it can never resurrect)
+    if (!App.settings.deletedLeadIds) App.settings.deletedLeadIds = [];
+    if (App.settings.deletedLeadIds.indexOf(id) < 0) App.settings.deletedLeadIds.push(id);
+    if (App.settings.trashedLeadIds) App.settings.trashedLeadIds = App.settings.trashedLeadIds.filter(function(tid){ return tid !== id; });
+    if (App.settings.deletedLeadIds.length > 500) App.settings.deletedLeadIds = App.settings.deletedLeadIds.slice(-500);
+    await App.touchAndSaveSettings();
+    if (navigator.onLine) { try { await Cloud.deleteRow('leads', id); } catch(e){} }
     await dbDelete('leads', id);
     App.toast('Lead permanently deleted', 'success');
     this.renderTrash();
@@ -3829,10 +3915,19 @@ const Leads = {
     var trashed = leads.filter(function(l){ return l.trashed; });
     if (trashed.length === 0) { App.toast('Trash is already empty', 'info'); return; }
     if (!confirm('Permanently delete all ' + trashed.length + ' leads in trash? This cannot be undone.')) return;
+    if (!App.settings.deletedLeadIds) App.settings.deletedLeadIds = [];
+    for (var i = 0; i < trashed.length; i++) {
+      if (App.settings.deletedLeadIds.indexOf(trashed[i].id) < 0) App.settings.deletedLeadIds.push(trashed[i].id);
+    }
+    if (App.settings.trashedLeadIds) {
+      var tIds = trashed.map(function(l){ return l.id; });
+      App.settings.trashedLeadIds = App.settings.trashedLeadIds.filter(function(tid){ return tIds.indexOf(tid) < 0; });
+    }
+    if (App.settings.deletedLeadIds.length > 500) App.settings.deletedLeadIds = App.settings.deletedLeadIds.slice(-500);
+    await App.touchAndSaveSettings();
     if (navigator.onLine) {
-      var now = new Date().toISOString();
       for (var i = 0; i < trashed.length; i++) {
-        try { await Cloud.update('leads', trashed[i].id, { deleted: true, updatedAt: now }); } catch(e){}
+        try { await Cloud.deleteRow('leads', trashed[i].id); } catch(e){}
       }
     }
     for (var i = 0; i < trashed.length; i++) await dbDelete('leads', trashed[i].id);
@@ -4279,7 +4374,7 @@ const Admin = {
     App.toast('User saved', 'success');
     this.renderUsers();
     App.populateLoginUsers();
-    Cloud.syncUpAdmin();
+    Cloud.syncUpUser(user);
   },
 
   async deleteUser(id) {
@@ -4602,6 +4697,9 @@ const Admin = {
         o.textContent = r.charAt(0).toUpperCase() + r.slice(1);
         sel.appendChild(o);
       });
+    }
+    for (var ai = 0; ai < affected.length; ai++) {
+      try { await Cloud.syncUpUser(affected[ai]); } catch(e){}
     }
     Cloud.syncUpAdmin();
     App.toast('Role "' + role + '" deleted', 'success');
