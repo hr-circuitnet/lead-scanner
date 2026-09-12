@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v42';
+const APP_VERSION = 'circuitnet-v43';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -369,6 +369,18 @@ const Cloud = {
     if (events.length > 0) await this.upsertBatch('events', events).catch(function(e){ console.error('Sync events:', e); });
     var settings = await dbGetAll('settings');
     if (settings.length > 0) await this.upsertBatch('settings', settings, 'key').catch(function(e){ console.error('Sync settings:', e); });
+  },
+
+  async syncUpUser(user) {
+    try {
+      await this.upsert('users', user);
+      this.log('syncUpUser: pushed user ' + user.username);
+      return true;
+    } catch(e) {
+      console.error('Sync user:', e);
+      this.log('syncUpUser failed: ' + e.message);
+      return false;
+    }
   },
 
   /**
@@ -766,8 +778,8 @@ const App = {
     // Look up user by username (case-insensitive)
     var users = await dbGetAll('users');
     var user = users.find(function(u){ return u.username && u.username.toLowerCase() === username.toLowerCase() && u.active; });
-    if (!user) { errEl.textContent = 'Invalid username or password'; return; }
-    if (user.password !== pass) { errEl.textContent = 'Invalid username or password'; return; }
+    if (!user) { errEl.textContent = 'Invalid User ID or password'; return; }
+    if (user.password !== pass) { errEl.textContent = 'Invalid User ID or password'; return; }
     // If admin role selected, verify user is actually an admin
     if (role === 'admin' && user.role !== 'admin') {
       errEl.textContent = 'This user does not have admin access'; return;
@@ -845,8 +857,8 @@ const App = {
         <button class="modal-close" onclick="Admin.closeModal()">×</button>
       </div>
       <div class="modal-body">
-        <div class="form-group"><label>Name</label><input type="text" id="mp_name" value="${esc(u.name||'')}"></div>
-        <div class="form-group"><label>Username</label><input type="text" id="mp_username" value="${esc(u.username||'')}"></div>
+        <div class="form-group"><label>Name</label><input type="text" id="mp_name" value="${esc(u.name||'')}" readonly style="background:#f0f0f0"><div style="font-size:11px;color:#999;margin-top:3px">Display name — set by admin</div></div>
+        <div class="form-group"><label>User ID</label><input type="text" id="mp_username" value="${esc(u.username||'')}" placeholder="Enter new User ID"></div>
         <div class="form-group"><label>New Password</label><input type="text" id="mp_password" value="${esc(u.password||'')}" placeholder="Enter new password"></div>
         <div class="form-group"><label>Role</label><input type="text" value="${esc(u.role.charAt(0).toUpperCase()+u.role.slice(1))}" readonly style="background:#f0f0f0"></div>
       </div>
@@ -859,26 +871,37 @@ const App = {
   },
 
   async saveProfile() {
-    var name = document.getElementById('mp_name').value.trim();
     var username = document.getElementById('mp_username').value.trim();
     var password = document.getElementById('mp_password').value.trim();
-    if (!name || !username || !password) { App.toast('All fields required', 'error'); return; }
+    if (!username || !password) { App.toast('User ID and password are required', 'error'); return; }
+    var uname = username.toLowerCase();
+    // Uniqueness check against local users
     var users = await dbGetAll('users');
-    if (users.some(function(u){ return u.username === username && u.id !== currentUser.id; })) {
-      App.toast('Username already exists', 'error'); return;
+    if (users.some(function(u){ return (u.username||'').toLowerCase() === uname && u.id !== currentUser.id; })) {
+      App.toast('User ID already exists — choose a different ID', 'error'); return;
     }
-    currentUser.name = name;
+    // Also check cloud users (another device may have taken this ID)
+    if (navigator.onLine) {
+      try {
+        var cloudUsers = await Cloud.fetchAll('users');
+        for (var i = 0; i < cloudUsers.length; i++) {
+          if ((cloudUsers[i].username||'').toLowerCase() === uname && cloudUsers[i].id !== currentUser.id) {
+            App.toast('User ID already exists — choose a different ID', 'error'); return;
+          }
+        }
+      } catch(e) { /* offline — local check only */ }
+    }
     currentUser.username = username;
     currentUser.password = password;
     currentUser.updatedAt = new Date().toISOString();
     await dbPut('users', currentUser);
     localStorage.setItem('cn_user', JSON.stringify(currentUser));
     Admin.closeModal();
-    document.getElementById('drawerUserName').textContent = name;
+    document.getElementById('drawerUserName').textContent = currentUser.name;
     document.getElementById('drawerUserRole').textContent = currentUser.role === 'admin' ? 'Admin' : currentUser.role.charAt(0).toUpperCase() + currentUser.role.slice(1);
-    document.getElementById('hdrAvatar').textContent = name.charAt(0).toUpperCase();
-    App.toast('Profile updated', 'success');
-    Cloud.syncUpAdmin();
+    document.getElementById('hdrAvatar').textContent = currentUser.name.charAt(0).toUpperCase();
+    App.toast('Profile updated and synced to cloud', 'success');
+    Cloud.syncUpUser(currentUser);
   },
 
   showApp() {
@@ -989,6 +1012,7 @@ const App = {
     else if (view === 'categories') Admin.renderCategories();
     else if (view === 'settings') Admin.renderSettings();
     else if (view === 'datasync') { /* rendered via HTML */ }
+    else if (view === 'about') { var avEl = document.getElementById('aboutVersion'); if (avEl) avEl.textContent = APP_VERSION; }
     window.scrollTo(0, 0);
   },
 
@@ -4013,7 +4037,7 @@ const Admin = {
       </div>
       <div class="modal-body">
         <div class="form-group"><label>Name</label><input type="text" id="mu_name" value="${esc(user.name||'')}" placeholder="Full name"></div>
-        <div class="form-group"><label>Username</label><input type="text" id="mu_username" value="${esc(user.username||'')}" placeholder="username"></div>
+        <div class="form-group"><label>User ID</label><input type="text" id="mu_username" value="${esc(user.username||'')}" placeholder="user ID"></div>
         <div class="form-group"><label>Password</label><div style="display:flex;gap:8px"><input type="text" id="mu_password" value="${esc(user.password||'')}" placeholder="password" style="flex:1"><button type="button" class="btn btn-outline" style="padding:8px 12px;font-size:13px;white-space:nowrap" onclick="Admin.resetPassword()">🔄 Reset</button></div></div>
         <div class="form-group"><label>Role</label><div style="display:flex;gap:8px"><select id="mu_role" style="flex:1">${Admin.getUserRoles().map(r => `<option value="${esc(r)}" ${user.role===r?'selected':''}>${esc(r.charAt(0).toUpperCase()+r.slice(1))}</option>`).join('')}</select><button type="button" class="btn btn-outline" style="padding:8px 12px;font-size:13px;white-space:nowrap" onclick="Admin.addRoleOption()">+ Add</button><button type="button" class="btn btn-outline" style="padding:8px 12px;font-size:13px;white-space:nowrap" onclick="Admin.deleteRoleOption()">🗑️</button></div></div>
         <div class="form-group"><label>Status</label><select id="mu_active"><option value="true" ${user.active?'selected':''}>Active</option><option value="false" ${!user.active?'selected':''}>Inactive</option></select></div>
@@ -4037,7 +4061,7 @@ const Admin = {
     if (!name || !username || !password) { App.toast('All fields required', 'error'); return; }
     // Check username uniqueness
     const users = await dbGetAll('users');
-    if (users.some(u => u.username === username && u.id !== id)) { App.toast('Username already exists', 'error'); return; }
+    if (users.some(u => (u.username||'').toLowerCase() === username.toLowerCase() && u.id !== id)) { App.toast('User ID already exists', 'error'); return; }
     const user = {
       id: id || ('u-' + Date.now() + '-' + Math.random().toString(36).slice(2,6)),
       name, username, password, role, active, canExport,

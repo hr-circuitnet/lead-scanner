@@ -304,8 +304,8 @@ a{text-decoration:none;color:inherit}
       <div class="expo-tag" id="loginEventTag">ELECTRONICA 2026 · BIEC BENGALURU · HALL 3 · STALL D15</div>
     </div>
     <div class="form-group">
-      <label>Username</label>
-      <input type="text" id="loginUser" placeholder="Enter username" autocomplete="username">
+      <label>User ID</label>
+      <input type="text" id="loginUser" placeholder="Enter User ID" autocomplete="username">
     </div>
     <div class="form-group">
       <label>Password</label>
@@ -387,6 +387,7 @@ a{text-decoration:none;color:inherit}
       <div class="drawer-item admin-only" onclick="App.navigate('categories')"><span class="di-icon">🏷️</span> Interest Categories</div>
       <div class="drawer-item admin-only" onclick="App.navigate('settings')"><span class="di-icon">⚙️</span> Settings</div>
       <div class="drawer-divider admin-only"></div>
+      <div class="drawer-item" onclick="App.navigate('about')"><span class="di-icon">ℹ️</span> About</div>
       <div class="drawer-item" onclick="App.checkForUpdates()" id="drawerCheckUpdate"><span class="di-icon">🔄</span> Check for Updates</div>
       <div class="drawer-item danger" onclick="App.logout()"><span class="di-icon">🚪</span> Logout</div>
     </div>
@@ -610,6 +611,89 @@ a{text-decoration:none;color:inherit}
       <pre id="syncDebugLog" style="background:#1a1a2e;color:#0f0;padding:10px;border-radius:8px;font-size:11px;max-height:400px;overflow-y:auto;white-space:pre-wrap;word-break:break-all">Sync log will appear here...</pre>
       <button class="btn btn-outline" style="width:100%;margin-top:8px;font-size:12px" onclick="var el=document.getElementById('syncDebugLog'); if(el) el.textContent='Sync log will appear here...'">Clear Log</button>
     </div>
+  </div>
+
+  <!-- ===== ABOUT ===== -->
+  <div class="view" id="view-about">
+
+    <div style="text-align:center;padding:8px 0 4px">
+      <img src="logo-login.png" alt="CircuitNet Technologies" style="max-width:190px;width:100%;margin-bottom:10px">
+      <h2 style="margin:0;font-size:20px">Expo Lead Scanner</h2>
+      <div style="font-size:12px;color:#888;margin-top:4px">Version: <span id="aboutVersion">—</span></div>
+    </div>
+
+    <div class="form-card">
+      <h3>📖 About This Tool</h3>
+      <p style="font-size:13px;color:#555;line-height:1.6;margin:0">CircuitNet Expo Lead Scanner captures, manages and exports exhibition leads. All data syncs to a central cloud database — every logged-in user works on the same live data from any device.</p>
+    </div>
+
+    <div class="form-card">
+      <h3>📷 Capture Leads</h3>
+      <div style="font-size:13px;color:#444;line-height:1.7">
+        <p style="margin:0 0 10px"><b>Scan Badge</b> — Opens the camera to scan the QR code / barcode on a visitor badge. Details are auto-parsed into the lead form. Tap the ✕ button on the camera view to close it.</p>
+        <p style="margin:0 0 10px"><b>Scan Visiting Card</b> — Photograph a visiting card (front side, and back side if needed). Review the capture, tap Finish, and OCR extracts the contact details into the lead form.</p>
+        <p style="margin:0 0 10px"><b>Scan from Image</b> — Pick an existing photo of a visiting card saved on your phone or laptop. Follows the same review and OCR flow as the camera scan. Also reads QR / barcode images.</p>
+        <p style="margin:0"><b>Manual Entry</b> — Type the lead details directly into the full lead form: name, company, designation, contact details, qualification, interest area, requirement and follow-up tracking.</p>
+      </div>
+    </div>
+
+    <div class="form-card">
+      <h3>📋 Manage Leads</h3>
+      <div style="font-size:13px;color:#444;line-height:1.7">
+        <p style="margin:0 0 10px"><b>Dashboard</b> — Home screen with live lead statistics: total leads, follow-ups, qualification split and today's captures.</p>
+        <p style="margin:0 0 10px"><b>View Leads</b> — Browse, search and filter all leads. Tap a lead to see full details, edit, or delete. Deleted leads move to Trash.</p>
+        <p style="margin:0 0 10px"><b>Trash</b> — Deleted leads are kept here. Admin can restore leads or permanently delete them.</p>
+        <p style="margin:0"><b>Export</b> — Download lead data (requires export permission from the admin).</p>
+      </div>
+    </div>
+
+    <div class="form-card">
+      <h3>👤 My Profile</h3>
+      <div style="font-size:13px;color:#444;line-height:1.7">
+        <p style="margin:0">Change your <b>User ID</b> and <b>password</b>. Your display name is set by the admin. User IDs must be unique — the app checks against the central database before saving. Changes sync to all devices immediately.</p>
+      </div>
+    </div>
+
+    <div class="form-card">
+      <h3>🛠️ Admin Features</h3>
+      <div style="font-size:13px;color:#444;line-height:1.7">
+        <p style="margin:0 0 10px"><b>Event Management</b> — Create and manage events (name, dates, venue). The default event set by the admin applies to all users; every captured lead is tagged with it.</p>
+        <p style="margin:0 0 10px"><b>User Management</b> — Add users, set display names, User IDs, passwords, roles and export permission. Custom roles can be added or deleted.</p>
+        <p style="margin:0 0 10px"><b>Interest Categories</b> — Manage the interest area options shown in the lead form.</p>
+        <p style="margin:0"><b>Settings</b> — Company details, lead qualification priorities, dropdown options (visitor types, volumes, timelines, follow-up types and statuses) and the OCR API key.</p>
+      </div>
+    </div>
+
+    <div class="form-card">
+      <h3>🔄 Recent Updates</h3>
+      <div style="font-size:12px;color:#555;line-height:1.7">
+        <p style="margin:0 0 8px"><b>v43</b> — Username renamed to User ID; profile now allows changing only User ID and password (display name is admin-controlled); About section added.</p>
+        <p style="margin:0 0 8px"><b>v42</b> — Scan from Image now works with visiting card photos saved on the phone or laptop.</p>
+        <p style="margin:0 0 8px"><b>v41</b> — Export properly blocked for users without permission; camera close (✕) button; camera permission remembered across logins.</p>
+        <p style="margin:0 0 8px"><b>v40</b> — Event selection restricted to admin; the default event applies to all users automatically.</p>
+        <p style="margin:0"><b>v39</b> — Lead qualification options from settings applied everywhere; deleted categories stay deleted; role delete option; sync improvements.</p>
+      </div>
+    </div>
+
+    <div class="form-card">
+      <h3>🏢 Company</h3>
+      <div style="font-size:13px;color:#444;line-height:1.8">
+        <p style="margin:0"><b>CircuitNet Technologies India Pvt Ltd</b><br>
+        No.268, Shubhayoga Township, 8th Cross, Kada Agrahara Main Rd,<br>
+        behind Saibaba Temple, Doddagubbi, Anagalapura,<br>
+        Bangalore, Karnataka 560077</p>
+      </div>
+    </div>
+
+    <div class="form-card">
+      <h3>👤 Admin Contact</h3>
+      <div style="font-size:13px;color:#444;line-height:1.8">
+        <p style="margin:0"><b>Anil Kumar KS</b><br>
+        Email: <a href="mailto:anilkumar.katte@circuit-net.com" style="color:var(--primary)">anilkumar.katte@circuit-net.com</a><br>
+        Phone: <a href="tel:+919845541526" style="color:var(--primary)">+91 98455 41526</a></p>
+      </div>
+    </div>
+
   </div>
 
   <!-- Bottom nav -->
