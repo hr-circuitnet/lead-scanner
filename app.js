@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v43';
+const APP_VERSION = 'circuitnet-v45';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -473,10 +473,23 @@ const Cloud = {
       this.log('syncDown: ' + cloudEvents.length + ' events from cloud');
     } catch (e) { this.log('❌ syncDown events: ' + e.message); }
 
-    // === SETTINGS (uses 'key' column, not 'id') ===
+    // === SETTINGS (uses 'key' column, not 'id'; newer timestamp wins) ===
     try {
       var cloudSettings = await this.fetchAll('settings', 'key');
-      for (var i = 0; i < cloudSettings.length; i++) await dbPut('settings', cloudSettings[i]);
+      var localRow = await dbGet('settings', 'app');
+      var localTs = (localRow && localRow.value && localRow.value.settingsUpdatedAt) ? localRow.value.settingsUpdatedAt : 0;
+      for (var i = 0; i < cloudSettings.length; i++) {
+        var cs = cloudSettings[i];
+        if (cs.key === 'app') {
+          if (typeof cs.value === 'string') { try { cs.value = JSON.parse(cs.value); } catch(e){} }
+          var cloudTs = (cs.value && cs.value.settingsUpdatedAt) ? cs.value.settingsUpdatedAt : 0;
+          if (localTs > cloudTs) continue; // local is newer — keep local
+          await dbPut('settings', cs);
+          if (cs.value) App.settings = cs.value;
+        } else {
+          await dbPut('settings', cs);
+        }
+      }
       this.log('syncDown: ' + cloudSettings.length + ' settings');
       // If admin set a default event, apply it for non-admin users
       if (typeof currentUser !== 'undefined' && currentUser && currentUser.role !== 'admin') {
@@ -551,6 +564,8 @@ const App = {
     this.initServiceWorker();
     // Pre-warm camera permission on first load so browser remembers it
     this.initCameraPermission();
+    // Trap the browser Back button: stay in the app, go to Dashboard
+    this.initBackButtonTrap();
     // Sync with cloud on startup (push local pending, pull cloud data)
     Cloud.sync();
     Cloud.startPolling();
@@ -575,6 +590,21 @@ const App = {
       // Permission denied or no camera — will prompt again when scanner is used
       console.log('Camera pre-warm skipped:', e.message);
     }
+  },
+
+  initBackButtonTrap() {
+    var self = this;
+    window.addEventListener('popstate', function() {
+      if (currentUser) {
+        // Re-push a state so the Back button keeps working inside the app
+        try { window.history.pushState({ cnApp: true }, ''); } catch(e) {}
+        // If not on the dashboard, go back to the dashboard
+        var dashEl = document.getElementById('view-dashboard');
+        if (dashEl && !dashEl.classList.contains('active')) {
+          self.navigate('dashboard');
+        }
+      }
+    });
   },
 
   /**
@@ -736,7 +766,7 @@ const App = {
     App.currentEvent = { id: evt.id, name: evt.name };
     localStorage.setItem('cn_current_event', JSON.stringify(App.currentEvent));
     App.settings.defaultEventId = eventId;
-    await dbPut('settings', { key: 'app', value: App.settings });
+    await App.touchAndSaveSettings();
     App.updateEventDisplay();
     var sel = document.getElementById('eventSelector');
     if (sel) sel.value = eventId;
@@ -907,6 +937,8 @@ const App = {
   showApp() {
     document.getElementById('loginScreen').style.display = 'none';
     document.getElementById('appScreen').style.display = 'block';
+    // Keep a history state so the browser Back button stays inside the app
+    try { window.history.pushState({ cnApp: true }, ''); } catch(e) {}
     document.getElementById('drawerUserName').textContent = currentUser.name;
     document.getElementById('drawerUserRole').textContent = currentUser.role === 'admin' ? 'Admin' : 'Salesperson';
     document.getElementById('hdrAvatar').textContent = currentUser.name.charAt(0).toUpperCase();
@@ -973,6 +1005,12 @@ const App = {
     var fgs = ['#dc3545', '#fd7e14', '#0d6efd'];
     if (idx >= 0 && idx < 3) return 'background:' + bgs[idx] + ';color:' + fgs[idx];
     return 'background:#e2e3e5;color:#6c757d';
+  },
+
+  async touchAndSaveSettings() {
+    App.settings.settingsUpdatedAt = Date.now();
+    var sRow = { key: 'app', value: App.settings };
+    await dbPut('settings', sRow);
   },
 
   async navigate(view) {
@@ -1894,7 +1932,10 @@ const CardScanner = {
     } catch (e) {
       console.error('Card scan error:', e);
       overlay.remove();
-      App.toast('Card scan failed: ' + e.message, 'error');
+      var failMsg = (e.message && e.message.indexOf('Failed to load image') === 0)
+        ? 'Could not read this image on this device — try the Scan Visiting Card camera option, or a different photo'
+        : 'Card scan failed: ' + e.message;
+      App.toast(failMsg, 'error');
     } finally {
       this.isProcessing = false;
     }
@@ -1967,10 +2008,38 @@ const CardScanner = {
    * Compress image to under 1MB for OCR.space free tier limit
    * Resizes and converts to JPEG with quality adjustment
    */
-  compressImage(file) {
+  /** Decode an image file robustly: createImageBitmap first (better
+   *  format and memory handling on phones), Image element as fallback. */
+  loadImageFile(file) {
     return new Promise(function(resolve, reject) {
-      var img = new Image();
-      img.onload = function() {
+      var tryImgElement = function() {
+        var url = URL.createObjectURL(file);
+        var img = new Image();
+        img.onload = function() { resolve(img); };
+        img.onerror = function() { URL.revokeObjectURL(url); reject(new Error('Failed to load image')); };
+        img.src = url;
+      };
+      if (window.createImageBitmap) {
+        createImageBitmap(file, { imageOrientation: 'from-image' }).then(function(bmp) {
+          resolve(bmp);
+        }).catch(function() {
+          // Older browsers may reject the options — retry plain
+          createImageBitmap(file).then(function(bmp) {
+            resolve(bmp);
+          }).catch(function() {
+            tryImgElement();
+          });
+        });
+      } else {
+        tryImgElement();
+      }
+    });
+  },
+
+  compressImage(file) {
+    var self = this;
+    return self.loadImageFile(file).then(function(img) {
+      return new Promise(function(resolve) {
         var maxDim = 2000; // Max width/height
         var quality = 0.9;
         var w = img.width;
@@ -1997,9 +2066,7 @@ const CardScanner = {
             resolve(blob);
           }
         }, 'image/jpeg', quality);
-      };
-      img.onerror = function() { reject(new Error('Failed to load image')); };
-      img.src = URL.createObjectURL(file);
+      });
     });
   },
 
@@ -2007,9 +2074,9 @@ const CardScanner = {
    * Preprocess image for Tesseract fallback (offline mode)
    */
   preprocessImage(file) {
-    return new Promise(function(resolve, reject) {
-      var img = new Image();
-      img.onload = function() {
+    var self = this;
+    return self.loadImageFile(file).then(function(img) {
+      return new Promise(function(resolve) {
         var targetWidth = 2000;
         var scale = 1;
         if (img.width < targetWidth) {
@@ -2037,9 +2104,7 @@ const CardScanner = {
         }
         ctx.putImageData(imageData, 0, 0);
         resolve(canvas);
-      };
-      img.onerror = function() { reject(new Error('Failed to load image')); };
-      img.src = URL.createObjectURL(file);
+      });
     });
   },
 
@@ -2106,7 +2171,15 @@ const CardScanner = {
     var usedLines = {};
     function hasKeyword(line, keywords) {
       var u = line.toUpperCase();
-      for (var i = 0; i < keywords.length; i++) { if (u.indexOf(keywords[i].toUpperCase()) >= 0) return true; }
+      for (var i = 0; i < keywords.length; i++) {
+        var kw = keywords[i].toUpperCase();
+        if (kw.length <= 4) {
+          // Word-boundary match for short keywords (HR, MD, VP, CEO, R&D...)
+          // so a name like "Shreya" does not match "HR" hidden inside it
+          var kwRe = new RegExp('\\b' + kw + '\\b');
+          if (kwRe.test(u)) return true;
+        } else if (u.indexOf(kw) >= 0) return true;
+      }
       return false;
     }
     function markUsed(idx) { usedLines[idx] = true; }
@@ -3966,7 +4039,7 @@ const Admin = {
     if (evtData && evtData.name) {
       if (!App.settings.deletedEventNames) App.settings.deletedEventNames = [];
       if (App.settings.deletedEventNames.indexOf(evtData.name) < 0) App.settings.deletedEventNames.push(evtData.name);
-      await dbPut('settings', { key: 'app', value: App.settings });
+      await App.touchAndSaveSettings();
     }
     await dbDelete('events', id);
     if (navigator.onLine) { try { await Cloud.deleteRow('events', id); } catch(e){ console.error('Cloud delete event:', e); } }
@@ -3984,7 +4057,7 @@ const Admin = {
         await this.setDefaultEvent(remaining[0].id);
       } else {
         delete App.settings.defaultEventId;
-        await dbPut('settings', { key: 'app', value: App.settings });
+        await App.touchAndSaveSettings();
       }
     }
     App.toast('Event deleted', 'success');
@@ -4080,7 +4153,7 @@ const Admin = {
     if (!confirm(`Delete user "${u.name}"?`)) return;
     if (!App.settings.deletedUserIds) App.settings.deletedUserIds = [];
     if (App.settings.deletedUserIds.indexOf(id) < 0) App.settings.deletedUserIds.push(id);
-    await dbPut('settings', { key: 'app', value: App.settings });
+    await App.touchAndSaveSettings();
     await dbDelete('users', id);
     if (navigator.onLine) { try { await Cloud.deleteRow('users', id); } catch(e){ console.error('Cloud delete user:', e); } }
     App.toast('User deleted', 'success');
@@ -4291,7 +4364,7 @@ const Admin = {
     };
     if (App.settings.deletedCategoryNames) {
       App.settings.deletedCategoryNames = App.settings.deletedCategoryNames.filter(function(n){ return n !== name; });
-      await dbPut('settings', { key: 'app', value: App.settings });
+      await App.touchAndSaveSettings();
     }
     await dbPut('categories', cat);
     this.closeModal();
@@ -4307,7 +4380,7 @@ const Admin = {
     if (c.name && App.settings.deletedCategoryNames.indexOf(c.name) < 0) App.settings.deletedCategoryNames.push(c.name);
     await dbDelete('categories', id);
     if (navigator.onLine) { try { await Cloud.deleteRow('categories', id); } catch(e){ console.error('Cloud delete category:', e); } }
-    await dbPut('settings', { key: 'app', value: App.settings });
+    await App.touchAndSaveSettings();
     App.toast('Category deleted', 'success');
     this.renderCategories();
     Cloud.syncUpAdmin();
@@ -4332,7 +4405,7 @@ const Admin = {
     }
     roles.push(name);
     App.settings.userRoles = roles;
-    await dbPut('settings', { key: 'app', value: App.settings });
+    await App.touchAndSaveSettings();
     var sel = document.getElementById('mu_role');
     if (sel) {
       var opt = document.createElement('option');
@@ -4347,15 +4420,46 @@ const Admin = {
     var sel = document.getElementById('mu_role');
     if (!sel || sel.selectedIndex < 0) { App.toast('Select a role to delete', 'error'); return; }
     var role = sel.value;
-    if (role === 'admin' || role === 'salesperson') { App.toast('Cannot delete default roles', 'error'); return; }
-    if (!confirm('Delete role "' + role + '"?')) return;
     var roles = this.getUserRoles();
-    roles = roles.filter(function(r){ return r !== role; });
-    App.settings.userRoles = roles;
-    await dbPut('settings', { key: 'app', value: App.settings });
-    sel.remove(sel.selectedIndex);
-    App.toast('Role deleted', 'success');
+    if (roles.length <= 1) { App.toast('At least one role must remain', 'error'); return; }
+    var remaining = roles.filter(function(r){ return r !== role; });
+    var reassignTo = remaining[0];
+    // Find users currently on this role
+    var users = await dbGetAll('users');
+    var affected = users.filter(function(u){ return u.role === role; });
+    var msg = 'Delete role "' + role + '"?';
+    if (affected.length > 0) msg += '\n' + affected.length + ' user(s) with this role will be reassigned to "' + reassignTo + '".';
+    if (role === 'admin' && currentUser && currentUser.role === 'admin') {
+      msg += '\n\nWARNING: deleting the Admin role will remove your own admin access!';
+    }
+    if (!confirm(msg)) return;
+    App.settings.userRoles = remaining;
+    await App.touchAndSaveSettings();
+    // Reassign affected users to the first remaining role
+    for (var i = 0; i < affected.length; i++) {
+      affected[i].role = reassignTo;
+      affected[i].updatedAt = new Date().toISOString();
+      await dbPut('users', affected[i]);
+    }
+    // Update current user if their own role was deleted
+    if (currentUser && currentUser.role === role) {
+      currentUser.role = reassignTo;
+      localStorage.setItem('cn_user', JSON.stringify(currentUser));
+      var roleEl = document.getElementById('drawerUserRole');
+      if (roleEl) roleEl.textContent = reassignTo.charAt(0).toUpperCase() + reassignTo.slice(1);
+    }
+    // Rebuild the dropdown without the deleted role
+    if (sel) {
+      sel.innerHTML = '';
+      remaining.forEach(function(r) {
+        var o = document.createElement('option');
+        o.value = r;
+        o.textContent = r.charAt(0).toUpperCase() + r.slice(1);
+        sel.appendChild(o);
+      });
+    }
     Cloud.syncUpAdmin();
+    App.toast('Role "' + role + '" deleted', 'success');
   },
 
   renderSettings() {
@@ -4390,7 +4494,7 @@ const Admin = {
       followUpTypes: document.getElementById('setFollowUpTypes').value,
       followUpStatuses: document.getElementById('setFollowUpStatuses').value
     };
-    await dbPut('settings', { key: 'app', value: App.settings });
+    await App.touchAndSaveSettings();
     App.toast('Dropdown options saved', 'success');
     Cloud.syncUpAdmin();
   },
@@ -4402,7 +4506,7 @@ const Admin = {
     App.settings.venue = document.getElementById('setVenue').value;
     App.settings.leadSource = document.getElementById('setLeadSource').value;
     App.settings.ocrApiKey = ocrEl ? ocrEl.value.trim() : (App.settings.ocrApiKey || '');
-    await dbPut('settings', { key: 'app', value: App.settings });
+    await App.touchAndSaveSettings();
     App.toast('Settings saved', 'success');
     Cloud.syncUpAdmin();
   }
