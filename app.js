@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v48';
+const APP_VERSION = 'circuitnet-v49';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -39,14 +39,48 @@ function openDB() {
   return Promise.resolve();
 }
 
+/** Apply deletion/trash tombstones from the settings blob. The database
+ *  tables may lack trashed/deleted columns (writes get stripped), but the
+ *  settings blob is schema-independent and always syncs — so it is the
+ *  source of truth for what was deleted or trashed on any device. */
+function _applyTombstones(store, rows) {
+  try {
+    var st = App.settings || {};
+    if (store === 'leads') {
+      var delIds = st.deletedLeadIds || [];
+      var trIds = st.trashedLeadIds || [];
+      rows = rows.filter(function(l) {
+        if (l.deleted) return false;
+        if (delIds.indexOf(l.id) >= 0) return false;
+        if (trIds.indexOf(l.id) >= 0) l.trashed = true;
+        return true;
+      });
+    } else if (store === 'users') {
+      var duIds = st.deletedUserIds || [];
+      rows = rows.filter(function(u) { return duIds.indexOf(u.id) < 0; });
+    } else if (store === 'categories') {
+      var dcNames = (st.deletedCategoryNames || []).map(function(n){ return n.toLowerCase(); });
+      rows = rows.filter(function(c) { return dcNames.indexOf((c.name || '').toLowerCase()) < 0; });
+    } else if (store === 'events') {
+      var deNames = (st.deletedEventNames || []).map(function(n){ return n.toLowerCase(); });
+      rows = rows.filter(function(ev) { return deNames.indexOf((ev.name || '').toLowerCase()) < 0; });
+    }
+  } catch(e) {}
+  return rows;
+}
+
 async function dbGetAll(store) {
   var now = Date.now();
   var entry = _cloudCache[store];
-  if (entry && entry.expiry > now) return entry.data.slice();
-  var orderCol = (store === 'settings') ? 'key' : 'id';
-  var rows = await Cloud.fetchAll(store, orderCol);
-  _cloudCache[store] = { data: rows, expiry: now + _cacheTTL };
-  return rows.slice();
+  var rows;
+  if (entry && entry.expiry > now) {
+    rows = entry.data.slice();
+  } else {
+    var orderCol = (store === 'settings') ? 'key' : 'id';
+    rows = await Cloud.fetchAll(store, orderCol);
+    _cloudCache[store] = { data: rows, expiry: now + _cacheTTL };
+  }
+  return _applyTombstones(store, rows);
 }
 
 async function dbGet(store, id) {
@@ -579,22 +613,27 @@ const Cloud = {
    * Full sync: push local changes, then pull cloud changes.
    */
   sync() {
-    // Cloud-direct mode: there is no sync engine. Drop the in-memory cache
-    // and refresh the active view so the next render fetches fresh data.
+    // Cloud-direct mode: there is no sync engine. Drop the in-memory cache,
+    // reload settings first (tombstones, default event), THEN re-render the
+    // active view with fresh data.
     invalidateCache();
-    try { App.loadSettings().then(function(){}, function(){}); } catch(e) {}
+    var doRender = function() {
+      try {
+        var isActive = function(id) {
+          var el = document.getElementById(id);
+          return el && el.classList.contains('active');
+        };
+        if (isActive('view-dashboard')) Dashboard.render();
+        if (isActive('view-leads')) Leads.render();
+        if (isActive('view-trash')) Leads.renderTrash();
+        if (isActive('view-users')) Admin.renderUsers();
+        if (isActive('view-categories')) Admin.renderCategories();
+        if (isActive('view-events')) Admin.renderEvents();
+      } catch(e) {}
+    };
     try {
-      var isActive = function(id) {
-        var el = document.getElementById(id);
-        return el && el.classList.contains('active');
-      };
-      if (isActive('view-dashboard')) Dashboard.render();
-      if (isActive('view-leads')) Leads.render();
-      if (isActive('view-trash')) Leads.renderTrash();
-      if (isActive('view-users')) Admin.renderUsers();
-      if (isActive('view-categories')) Admin.renderCategories();
-      if (isActive('view-events')) Admin.renderEvents();
-    } catch(e) {}
+      App.loadSettings().then(doRender, doRender);
+    } catch(e) { doRender(); }
   },
 
   async _workSync() {
@@ -3821,17 +3860,22 @@ const Leads = {
     lead.updatedAt = new Date().toISOString();
     lead.syncStatus = 'Synced';
     lead.syncedAt = new Date().toISOString();
-    await dbPut('leads', lead);
-    // Tombstone the trash state in settings (propagates even if the leads
-    // table lacks a 'trashed' column)
+    try {
+      await dbPut('leads', lead);
+    } catch(e) {
+      console.error('Cloud write failed:', e);
+      App.toast('Could not reach the database — lead NOT deleted. Check your connection.', 'error');
+      return;
+    }
+    // Tombstone the trash state in the settings blob — this is what makes
+    // the deletion stick on every device (schema-independent)
     if (!App.settings.trashedLeadIds) App.settings.trashedLeadIds = [];
     if (App.settings.trashedLeadIds.indexOf(id) < 0) App.settings.trashedLeadIds.push(id);
-    await App.touchAndSaveSettings();
-    if (navigator.onLine) {
-      try { await Cloud.upsert('leads', lead); }
-      catch(e) { console.error('Cloud push failed:', e); }
-    }
-    App.toast('Lead moved to trash', 'success');
+    var settingsOk = true;
+    try { await App.touchAndSaveSettings(); }
+    catch(e) { settingsOk = false; }
+    if (settingsOk) App.toast('Lead moved to trash', 'success');
+    else App.toast('Deleted — but not synced to other devices yet (network issue)', 'error');
     App.navigate('leads');
     Leads.render();
   },

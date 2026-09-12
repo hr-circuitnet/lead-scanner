@@ -667,11 +667,11 @@ a{text-decoration:none;color:inherit}
     <div class="form-card">
       <h3>🔄 Recent Updates</h3>
       <div style="font-size:12px;color:#555;line-height:1.7">
+        <p style="margin:0 0 8px"><b>v49</b> — Fixed deleted leads resurrecting: deletion/trash state is now applied from the central settings record on every read, so a deleted lead stays deleted on every device regardless of table schema.</p>
         <p style="margin:0 0 8px"><b>v48</b> — Cloud-direct data layer: no local storage at all. Every page fetches live data from the central database and every change is written to it immediately — deleted leads and users can never reappear.</p>
         <p style="margin:0 0 8px"><b>v47</b> — Complete sync engine overhaul: serialized queue (no more race conditions), fetch timeouts (no more frozen sync), tombstones for deleted/trashed leads, admin event applies to all users, users no longer mass-pushed (fixes role resets permanently).</p>
         <p style="margin:0 0 8px"><b>v46</b> — HEIC photo support for Scan from Image; badge scan now also reads printed text on badges; deleted categories can no longer reappear; user role changes sync correctly; categories sorted alphanumerically.</p>
         <p style="margin:0 0 8px"><b>v45</b> — Browser Back button now returns to Dashboard instead of leaving the app; visiting card name/designation parsing fixed; image loading made more reliable across phones.</p>
-        <p style="margin:0 0 8px"><b>v44</b> — Company website added to About; all roles (including defaults) can now be added or deleted by admin; settings sync fixed so role changes persist across devices.</p>
       </div>
     </div>
 
