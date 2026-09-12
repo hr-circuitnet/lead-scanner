@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v47';
+const APP_VERSION = 'circuitnet-v48';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -20,82 +20,57 @@ let currentUser = null;
 let html5QrCode = null;
 let editLeadId = null;
 
-/* ========================= INDEXEDDB ========================= */
+/* ========================= CLOUD-DIRECT DATA LAYER =========================
+   NO local storage. Every read fetches live data from the central database;
+   every write goes straight to it. A brief in-memory cache (5 seconds) only
+   de-duplicates fetches within a single render pass. If the network fails,
+   reads throw — the app keeps showing the last rendered content rather
+   than pretending the data is empty. */
+var _cloudCache = {};
+var _cacheTTL = 5000;
+
+function invalidateCache(table) {
+  if (table) { delete _cloudCache[table]; }
+  else { _cloudCache = {}; }
+}
+
 function openDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = (e) => {
-      const d = e.target.result;
-      if (!d.objectStoreNames.contains('leads')) {
-        const s = d.createObjectStore('leads', { keyPath: 'id' });
-        s.createIndex('badgeId', 'badgeId', { unique: false });
-        s.createIndex('email', 'email', { unique: false });
-        s.createIndex('phone', 'phone', { unique: false });
-        s.createIndex('priority', 'priority', { unique: false });
-        s.createIndex('syncStatus', 'syncStatus', { unique: false });
-        s.createIndex('salesperson', 'salesperson', { unique: false });
-        s.createIndex('date', 'date', { unique: false });
-      }
-      if (!d.objectStoreNames.contains('users')) {
-        d.createObjectStore('users', { keyPath: 'id' });
-      }
-      if (!d.objectStoreNames.contains('categories')) {
-        d.createObjectStore('categories', { keyPath: 'id' });
-      }
-      if (!d.objectStoreNames.contains('settings')) {
-        d.createObjectStore('settings', { keyPath: 'key' });
-      }
-      if (!d.objectStoreNames.contains('events')) {
-        d.createObjectStore('events', { keyPath: 'id' });
-      }
-    };
-    req.onsuccess = (e) => { db = e.target.result; resolve(db); };
-    req.onerror = (e) => reject(e.target.error);
-  });
+  // No local database — all data lives in the central cloud database.
+  return Promise.resolve();
 }
 
-function tx(store, mode = 'readonly') {
-  return db.transaction(store, mode).objectStore(store);
+async function dbGetAll(store) {
+  var now = Date.now();
+  var entry = _cloudCache[store];
+  if (entry && entry.expiry > now) return entry.data.slice();
+  var orderCol = (store === 'settings') ? 'key' : 'id';
+  var rows = await Cloud.fetchAll(store, orderCol);
+  _cloudCache[store] = { data: rows, expiry: now + _cacheTTL };
+  return rows.slice();
 }
 
-function dbGetAll(store) {
-  return new Promise((resolve, reject) => {
-    const req = tx(store).getAll();
-    req.onsuccess = () => resolve(req.result || []);
-    req.onerror = () => reject(req.error);
-  });
+async function dbGet(store, id) {
+  var rows = await dbGetAll(store);
+  for (var i = 0; i < rows.length; i++) {
+    if (store === 'settings' ? rows[i].key === id : rows[i].id === id) return rows[i];
+  }
+  return null;
 }
 
-function dbGet(store, id) {
-  return new Promise((resolve, reject) => {
-    const req = tx(store).get(id);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
+async function dbPut(store, obj) {
+  invalidateCache(store);
+  var conflictCol = (store === 'settings') ? 'key' : 'id';
+  return await Cloud.upsert(store, obj, conflictCol);
 }
 
-function dbPut(store, obj) {
-  return new Promise((resolve, reject) => {
-    const req = tx(store, 'readwrite').put(obj);
-    req.onsuccess = () => resolve(obj);
-    req.onerror = () => reject(req.error);
-  });
+async function dbDelete(store, id) {
+  invalidateCache(store);
+  await Cloud.deleteRow(store, id);
 }
 
-function dbDelete(store, id) {
-  return new Promise((resolve, reject) => {
-    const req = tx(store, 'readwrite').delete(id);
-    req.onsuccess = () => resolve();
-    req.onerror = () => reject(req.error);
-  });
-}
-
-function dbCount(store) {
-  return new Promise((resolve, reject) => {
-    const req = tx(store).count();
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
+async function dbCount(store) {
+  var rows = await dbGetAll(store);
+  return rows.length;
 }
 
 /* ========================= CLOUD (SUPABASE) ========================= */
@@ -358,8 +333,8 @@ const Cloud = {
    * Called on every 15-second poll.
    */
   syncUpLeads() {
-    var self = this;
-    return self.enqueue(function() { return self._workSyncUpLeads(); });
+    // Cloud-direct mode: writes go straight to the database — nothing to push.
+    return Promise.resolve();
   },
 
   async _workSyncUpLeads() {
@@ -392,8 +367,8 @@ const Cloud = {
    * Only called when admin makes changes — NOT on every poll.
    */
   syncUpAdmin() {
-    var self = this;
-    return self.enqueue(function() { return self._workSyncUpAdmin(); });
+    // Cloud-direct mode: writes go straight to the database — nothing to push.
+    return Promise.resolve();
   },
 
   async _workSyncUpAdmin() {
@@ -415,9 +390,8 @@ const Cloud = {
   },
 
   syncUpUser(user) {
-    var self = this;
-    var u = user;
-    return self.enqueue(function() { return self._workSyncUpUser(u); });
+    // Cloud-direct mode: writes go straight to the database — nothing to push.
+    return Promise.resolve();
   },
 
   async _workSyncUpUser(user) {
@@ -605,8 +579,22 @@ const Cloud = {
    * Full sync: push local changes, then pull cloud changes.
    */
   sync() {
-    var self = this;
-    return self.enqueue(function() { return self._workSync(); });
+    // Cloud-direct mode: there is no sync engine. Drop the in-memory cache
+    // and refresh the active view so the next render fetches fresh data.
+    invalidateCache();
+    try { App.loadSettings().then(function(){}, function(){}); } catch(e) {}
+    try {
+      var isActive = function(id) {
+        var el = document.getElementById(id);
+        return el && el.classList.contains('active');
+      };
+      if (isActive('view-dashboard')) Dashboard.render();
+      if (isActive('view-leads')) Leads.render();
+      if (isActive('view-trash')) Leads.renderTrash();
+      if (isActive('view-users')) Admin.renderUsers();
+      if (isActive('view-categories')) Admin.renderCategories();
+      if (isActive('view-events')) Admin.renderEvents();
+    } catch(e) {}
   },
 
   async _workSync() {
@@ -752,8 +740,18 @@ const App = {
   },
 
   async seedDefaults() {
-    // Seed admin user
-    const users = await dbGetAll('users');
+    // Seed ONLY when the cloud database is verifiably empty. If the network
+    // is unavailable, skip seeding entirely — seeding on a network error
+    // would resurrect users and categories the admin deleted.
+    var users, cats, events;
+    try {
+      users = await dbGetAll('users');
+      cats = await dbGetAll('categories');
+      events = await dbGetAll('events');
+    } catch (e) {
+      console.warn('seedDefaults skipped — cloud unreachable:', e.message);
+      return;
+    }
     if (users.length === 0) {
       await dbPut('users', { id: 'u-admin', name: 'CircuitNet', username: 'admin', password: 'admin123', role: 'admin', active: true, canExport: true, created: new Date().toISOString() });
       await dbPut('users', { id: 'u-sales1', name: 'Rajesh Kumar', username: 'rajesh', password: 'pass123', role: 'salesperson', active: true, canExport: false, created: new Date().toISOString() });
@@ -763,7 +761,6 @@ const App = {
     // Seed default categories ONLY on first install (when the store is empty).
     // We intentionally do NOT re-add categories the admin has deleted, so
     // deletions survive app restarts and version updates.
-    const cats = await dbGetAll('categories');
     if (cats.length === 0) {
       for (const c of DEFAULT_CATEGORIES) {
         await dbPut('categories', { id: 'cat-' + Date.now() + '-' + Math.random().toString(36).slice(2,8), name: c, active: true });
@@ -772,7 +769,6 @@ const App = {
     // Clean up duplicate categories (keep first occurrence of each name)
     await this.dedupCategories();
     // Seed default event
-    const events = await dbGetAll('events');
     if (events.length === 0) {
       await dbPut('events', { id: 'evt-1', name: 'Electronica 2026', venue: 'BIEC Bengaluru, Hall 3, Stall D15', startDate: '2026-09-08', endDate: '2026-09-10', date: '2026-09-08', active: true, created: new Date().toISOString() });
     }
@@ -802,7 +798,9 @@ const App = {
   },
 
   async loadSettings() {
-    const s = await dbGet('settings', 'app');
+    var s = null;
+    try { s = await dbGet('settings', 'app'); }
+    catch (e) { console.warn('loadSettings: cloud unreachable, using defaults'); }
     App.settings = s ? s.value : {
       companyName: 'CircuitNet Technologies',
       eventName: 'Electronica 2026',
@@ -817,7 +815,8 @@ const App = {
     if (savedEvent) {
       App.currentEvent = JSON.parse(savedEvent);
     } else {
-      var events = await dbGetAll('events');
+      var events = [];
+      try { events = await dbGetAll('events'); } catch(e2) {}
       // If admin set a default event, use it
       if (App.settings.defaultEventId) {
         var defEvt = null;
@@ -902,7 +901,9 @@ const App = {
     errEl.textContent = '';
     if (!username) { errEl.textContent = 'Enter username'; return; }
     // Look up user by username (case-insensitive)
-    var users = await dbGetAll('users');
+    var users = [];
+    try { users = await dbGetAll('users'); }
+    catch (e) { errEl.textContent = 'Network error — check your connection and try again'; return; }
     var user = users.find(function(u){ return u.username && u.username.toLowerCase() === username.toLowerCase() && u.active; });
     if (!user) { errEl.textContent = 'Invalid User ID or password'; return; }
     if (user.password !== pass) { errEl.textContent = 'Invalid User ID or password'; return; }
@@ -1187,16 +1188,8 @@ const App = {
       badge.className = 'sync-badge sync-offline';
       text.textContent = 'Offline';
     } else {
-      // Check if there are pending leads
-      var leads = await dbGetAll('leads');
-      var pending = leads.filter(function(l){ return l.syncStatus !== 'Synced'; }).length;
-      if (pending > 0) {
-        badge.className = 'sync-badge sync-offline';
-        text.textContent = pending + ' pending';
-      } else {
-        badge.className = 'sync-badge sync-online';
-        text.textContent = 'Cloud Sync';
-      }
+      badge.className = 'sync-badge sync-online';
+      text.textContent = 'Cloud';
     }
   },
 
