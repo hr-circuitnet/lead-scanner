@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v45';
+const APP_VERSION = 'circuitnet-v46';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -363,7 +363,12 @@ const Cloud = {
   async syncUpAdmin() {
     var users = await dbGetAll('users');
     if (users.length > 0) await this.upsertBatch('users', users).catch(function(e){ console.error('Sync users:', e); });
-    var cats = await dbGetAll('categories');
+    // Never push categories on the deleted-names list — pushing them would
+    // resurrect deleted categories in the cloud and on every other device
+    var delCatNames = (App.settings.deletedCategoryNames || []).map(function(n){ return n.toLowerCase(); });
+    var cats = (await dbGetAll('categories')).filter(function(c) {
+      return delCatNames.indexOf((c.name || '').toLowerCase()) < 0;
+    });
     if (cats.length > 0) await this.upsertBatch('categories', cats).catch(function(e){ console.error('Sync cats:', e); });
     var events = await dbGetAll('events');
     if (events.length > 0) await this.upsertBatch('events', events).catch(function(e){ console.error('Sync events:', e); });
@@ -417,27 +422,46 @@ const Cloud = {
       }
     } catch (e) { this.log('❌ syncDown leads: ' + e.message); }
 
-    // === USERS (skip deleted IDs) ===
+    // === USERS (skip deleted IDs; newer updatedAt wins so local edits
+    // are not reverted by stale cloud data) ===
     try {
       var cloudUsers = await this.fetchAll('users');
       var deletedUserIds = App.settings.deletedUserIds || [];
       for (var i = 0; i < cloudUsers.length; i++) {
-        if (deletedUserIds.indexOf(cloudUsers[i].id) < 0) await dbPut('users', cloudUsers[i]);
+        var cu = cloudUsers[i];
+        if (deletedUserIds.indexOf(cu.id) >= 0) continue;
+        var lu = await dbGet('users', cu.id);
+        if (lu && lu.updatedAt && cu.updatedAt && lu.updatedAt > cu.updatedAt) continue; // local is newer
+        await dbPut('users', cu);
       }
       this.log('syncDown: ' + cloudUsers.length + ' users');
     } catch (e) { this.log('❌ syncDown users: ' + e.message); }
 
-    // === CATEGORIES (skip deleted names, dedup by name) ===
+    // === CATEGORIES (skip + purge deleted names, dedup by name) ===
     try {
       var cloudCats = await this.fetchAll('categories');
       var localCats = await dbGetAll('categories');
-      var seenNames = {};
-      for (var i = 0; i < localCats.length; i++) seenNames[localCats[i].name.toLowerCase()] = true;
       var deletedCatNames = (App.settings.deletedCategoryNames || []).map(function(n){ return n.toLowerCase(); });
+      var seenNames = {};
+      // Remove any local categories that are on the deleted list
+      for (var i = 0; i < localCats.length; i++) {
+        var ln = (localCats[i].name || '').toLowerCase();
+        if (deletedCatNames.indexOf(ln) >= 0) {
+          await dbDelete('categories', localCats[i].id);
+        } else {
+          seenNames[ln] = true;
+        }
+      }
       var added = 0;
       for (var i = 0; i < cloudCats.length; i++) {
         var cn = (cloudCats[i].name || '').toLowerCase();
-        if (cn && !seenNames[cn] && deletedCatNames.indexOf(cn) < 0) {
+        if (!cn) continue;
+        if (deletedCatNames.indexOf(cn) >= 0) {
+          // Cleanup: remove the deleted-name row from the cloud itself
+          try { await this.deleteRow('categories', cloudCats[i].id); } catch(e2) {}
+          continue;
+        }
+        if (!seenNames[cn]) {
           await dbPut('categories', cloudCats[i]);
           seenNames[cn] = true;
           added++;
@@ -1708,6 +1732,10 @@ const Scanner = {
   },
 
   async onScan(decodedText) {
+    // Capture the camera frame FIRST (before stopping) so we can also
+    // OCR any text printed on the badge alongside the QR/barcode
+    var frameCanvas = this.captureFrame();
+
     // Stop scanning to process
     await this.stop();
 
@@ -1717,6 +1745,23 @@ const Scanner = {
     const result = Parser.parse(decodedText);
     const fields = result.fields;
 
+    // Read printed text on the badge (name, company...) and merge it in.
+    // Data from the QR code always wins over OCR text.
+    if (frameCanvas && navigator.onLine) {
+      try {
+        document.getElementById('scanStatus').textContent = '✓ Badge scanned! Reading badge text...';
+        var ocrText = await this.ocrFrame(frameCanvas);
+        if (ocrText && ocrText.trim()) {
+          var textFields = CardScanner.parseCardText(ocrText);
+          ['name','company','designation','email','phone'].forEach(function(k) {
+            if (!fields[k] && textFields[k]) fields[k] = textFields[k];
+          });
+        }
+      } catch(e) {
+        console.warn('Badge text OCR failed:', e);
+      }
+    }
+
     // Check for duplicates
     const dup = await this.checkDuplicate(fields);
 
@@ -1725,6 +1770,57 @@ const Scanner = {
 
     // Auto-fill the manual form with parsed data
     ManualForm.prefillFromScan(decodedText, fields, dup);
+  },
+
+  /** Grab the current camera frame from the scanner video element. */
+  captureFrame() {
+    try {
+      var video = document.querySelector('#qrReader video');
+      if (!video || !video.videoWidth) return null;
+      var canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      canvas.getContext('2d').drawImage(video, 0, 0);
+      return canvas;
+    } catch(e) {
+      return null;
+    }
+  },
+
+  /** OCR a captured frame via OCR.space — with a timeout so the badge
+   *  scan never stalls if the network is slow. */
+  ocrFrame(canvas) {
+    var apiKey = (App.settings && App.settings.ocrApiKey) ? App.settings.ocrApiKey : '';
+    if (!apiKey) return Promise.resolve(null);
+    return new Promise(function(resolve) {
+      var settled = false;
+      var done = function(v) { if (!settled) { settled = true; resolve(v); } };
+      setTimeout(function() { done(null); }, 8000);
+      try {
+        canvas.toBlob(function(blob) {
+          if (!blob) { done(null); return; }
+          var formData = new FormData();
+          formData.append('apikey', apiKey);
+          formData.append('file', blob, 'badge-frame.jpg');
+          formData.append('language', 'eng');
+          formData.append('isOverlayRequired', 'false');
+          formData.append('scale', 'true');
+          formData.append('OCREngine', '2');
+          fetch('https://api.ocr.space/parse/image', { method: 'POST', body: formData })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+              if (data && !data.IsErroredOnProcessing && data.ParsedResults && data.ParsedResults.length > 0) {
+                done((data.ParsedResults[0].ParsedText || '').trim());
+              } else {
+                done(null);
+              }
+            })
+            .catch(function() { done(null); });
+        }, 'image/jpeg', 0.9);
+      } catch(e) {
+        done(null);
+      }
+    });
   },
 
   async checkDuplicate(fields) {
@@ -1783,6 +1879,42 @@ const CardScanner = {
   isBackSide: false,
   fromGallery: false,
 
+  /** Ensure the picked image is decodable by this browser. If not
+   *  (e.g. HEIC photos from some phones), convert it to JPEG via heic2any. */
+  async normalizeImageFile(file) {
+    if (!file) return file;
+    var decodable = false;
+    if (window.createImageBitmap) {
+      try {
+        var bmp = await createImageBitmap(file);
+        if (bmp && bmp.close) bmp.close();
+        decodable = true;
+      } catch(e) {}
+    } else {
+      decodable = true; // cannot test — let later stages handle it
+    }
+    if (decodable) return file;
+    // Browser cannot decode it — try HEIC/HEIF conversion
+    try {
+      if (typeof heic2any === 'undefined') {
+        await this.loadScript('https://cdn.jsdelivr.net/npm/heic2any/dist/heic2any.min.js');
+      }
+      if (typeof heic2any === 'function') {
+        var out = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.9 });
+        if (Array.isArray(out)) out = out[0];
+        if (out && out.size > 0) {
+          try {
+            out = new File([out], (file.name || 'card').replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' });
+          } catch(e2) {}
+          return out;
+        }
+      }
+    } catch(e) {
+      console.warn('HEIC conversion failed:', e);
+    }
+    return file;
+  },
+
   async scanFromFile(file) {
     if (!file) return;
     App.toggleDrawer(false);
@@ -1800,10 +1932,11 @@ const CardScanner = {
     this.scan(file, true);
   },
 
-  scan(file, fromGallery) {
+  async scan(file, fromGallery) {
     if (!file) return;
     App.toggleDrawer(false);
     this.fromGallery = !!fromGallery;
+    file = await this.normalizeImageFile(file);
     var url = URL.createObjectURL(file);
     if (this.isBackSide) {
       if (this.pendingFiles[1] && this.pendingFiles[1].url) { try { URL.revokeObjectURL(this.pendingFiles[1].url); } catch(e){} }
@@ -2957,7 +3090,7 @@ const ManualForm = {
 
   async render() {
     const cats = await dbGetAll('categories');
-    const activeCats = cats.filter(c => c.active).map(c => c.name);
+    const activeCats = cats.filter(c => c.active).map(c => c.name).sort((a,b) => a.localeCompare(b, undefined, {numeric: true}));
     const isEdit = !!editLeadId;
     let lead = null;
     if (isEdit) {
@@ -3383,7 +3516,7 @@ const Leads = {
 
   async render() {
     const cats = await dbGetAll('categories');
-    const activeCats = cats.filter(c => c.active).map(c => c.name);
+    const activeCats = cats.filter(c => c.active).map(c => c.name).sort((a,b) => a.localeCompare(b, undefined, {numeric: true}));
     const users = await dbGetAll('users');
 
     // Render filter chips
@@ -3765,7 +3898,7 @@ const Dashboard = {
 
   async renderInterestChart(leads) {
     const cats = await dbGetAll('categories');
-    const activeCats = cats.filter(c => c.active).map(c => c.name);
+    const activeCats = cats.filter(c => c.active).map(c => c.name).sort((a,b) => a.localeCompare(b, undefined, {numeric: true}));
     const counts = {};
     leads.forEach(l => { if (l.interest) counts[l.interest] = (counts[l.interest]||0)+1; });
     const sorted = Object.entries(counts).sort((a,b) => b[1]-a[1]).slice(0, 8);
@@ -3829,7 +3962,7 @@ const Dashboard = {
 const Export = {
   async init() {
     const cats = await dbGetAll('categories');
-    const activeCats = cats.filter(c => c.active).map(c => c.name);
+    const activeCats = cats.filter(c => c.active).map(c => c.name).sort((a,b) => a.localeCompare(b, undefined, {numeric: true}));
     const users = await dbGetAll('users');
 
     const interestSel = document.getElementById('exportInterest');
@@ -4138,7 +4271,8 @@ const Admin = {
     const user = {
       id: id || ('u-' + Date.now() + '-' + Math.random().toString(36).slice(2,6)),
       name, username, password, role, active, canExport,
-      created: isEdit ? (await dbGet('users', id)).created : new Date().toISOString()
+      created: isEdit ? (await dbGet('users', id)).created : new Date().toISOString(),
+      updatedAt: new Date().toISOString()
     };
     await dbPut('users', user);
     this.closeModal();
@@ -4305,7 +4439,7 @@ const Admin = {
 
   async renderCategories() {
     const cats = await dbGetAll('categories');
-    cats.sort((a,b) => (a.name||'').localeCompare(b.name||''));
+    cats.sort((a,b) => (a.name||'').localeCompare(b.name||'', undefined, {numeric: true}));
     const container = document.getElementById('categoryList');
     if (cats.length === 0) {
       container.innerHTML = '<div class="empty-state"><p>No categories. Add one above.</p></div>';
@@ -4379,7 +4513,18 @@ const Admin = {
     if (!App.settings.deletedCategoryNames) App.settings.deletedCategoryNames = [];
     if (c.name && App.settings.deletedCategoryNames.indexOf(c.name) < 0) App.settings.deletedCategoryNames.push(c.name);
     await dbDelete('categories', id);
-    if (navigator.onLine) { try { await Cloud.deleteRow('categories', id); } catch(e){ console.error('Cloud delete category:', e); } }
+    if (navigator.onLine) {
+      try { await Cloud.deleteRow('categories', id); } catch(e){ console.error('Cloud delete category:', e); }
+      // Also delete any cloud rows with the same name (duplicates get new IDs)
+      try {
+        var cloudCats = await Cloud.fetchAll('categories');
+        for (var ci = 0; ci < cloudCats.length; ci++) {
+          if ((cloudCats[ci].name || '') === c.name) {
+            try { await Cloud.deleteRow('categories', cloudCats[ci].id); } catch(e2){}
+          }
+        }
+      } catch(e3){}
+    }
     await App.touchAndSaveSettings();
     App.toast('Category deleted', 'success');
     this.renderCategories();
