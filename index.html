@@ -409,10 +409,10 @@ a{text-decoration:none;color:inherit}
       <div class="stat-card"><div class="stat-label">Today</div><div class="stat-value" id="statToday">0</div></div>
     </div>
     <div class="main-actions">
+      <div class="action-btn scan" onclick="document.getElementById('cardScanInput').click()"><span class="ab-icon">🪪</span>SCAN VISITING CARD</div>
       <div class="action-btn scan" onclick="App.navigate('scan')"><span class="ab-icon">📷</span>SCAN BADGE</div>
       <div class="action-btn manual" onclick="App.navigate('manual')"><span class="ab-icon">✍️</span>MANUAL ENTRY</div>
       <div class="action-btn leads" onclick="App.navigate('leads')"><span class="ab-icon">📋</span>VIEW LEADS</div>
-      <div class="action-btn export" onclick="App.navigate('export')"><span class="ab-icon">📤</span>EXPORT</div>
     </div>
     <div class="dash-section">
       <h3>Leads by Priority</h3>
@@ -667,11 +667,11 @@ a{text-decoration:none;color:inherit}
     <div class="form-card">
       <h3>🔄 Recent Updates</h3>
       <div style="font-size:12px;color:#555;line-height:1.7">
+        <p style="margin:0 0 8px"><b>v51</b> — Dashboard buttons updated: Export replaced with Scan Visiting Card; order is now Scan Visiting Card, Scan Badge, Manual Entry, View Leads.</p>
         <p style="margin:0 0 8px"><b>v50</b> — Home screen app icon replaced with the company logo; the role badge next to the user name now shows the user's actual role.</p>
         <p style="margin:0 0 8px"><b>v49</b> — Fixed deleted leads resurrecting: deletion/trash state is now applied from the central settings record on every read, so a deleted lead stays deleted on every device regardless of table schema.</p>
         <p style="margin:0 0 8px"><b>v48</b> — Cloud-direct data layer: no local storage at all. Every page fetches live data from the central database and every change is written to it immediately — deleted leads and users can never reappear.</p>
         <p style="margin:0 0 8px"><b>v47</b> — Complete sync engine overhaul: serialized queue (no more race conditions), fetch timeouts (no more frozen sync), tombstones for deleted/trashed leads, admin event applies to all users, users no longer mass-pushed (fixes role resets permanently).</p>
-        <p style="margin:0 0 8px"><b>v46</b> — HEIC photo support for Scan from Image; badge scan now also reads printed text on badges; deleted categories can no longer reappear; user role changes sync correctly; categories sorted alphanumerically.</p>
       </div>
     </div>
 
