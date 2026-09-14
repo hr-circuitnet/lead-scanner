@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v51';
+const APP_VERSION = 'circuitnet-v53';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -80,7 +80,16 @@ async function dbGetAll(store) {
     rows = await Cloud.fetchAll(store, orderCol);
     _cloudCache[store] = { data: rows, expiry: now + _cacheTTL };
   }
-  return _applyTombstones(store, rows);
+  var out = _applyTombstones(store, rows);
+  // Offline-captured leads appear everywhere with a _pending flag
+  if (store === 'leads') {
+    var pq = getPendingLeads();
+    for (var i = 0; i < pq.length; i++) {
+      pq[i]._pending = true;
+      out.push(pq[i]);
+    }
+  }
+  return out;
 }
 
 async function dbGet(store, id) {
@@ -105,6 +114,34 @@ async function dbDelete(store, id) {
 async function dbCount(store) {
   var rows = await dbGetAll(store);
   return rows.length;
+}
+
+/* ========================= OFFLINE PENDING QUEUE =========================
+   Leads captured while offline (or when the cloud is unreachable) are kept
+   in a local queue, highlighted in the UI, and pushed to the central
+   database manually via the "Push to Database" button. */
+function getPendingLeads() {
+  try { return JSON.parse(localStorage.getItem('cn_pending_leads') || '[]'); }
+  catch (e) { return []; }
+}
+function addPendingLead(lead) {
+  var arr = getPendingLeads();
+  var l = {};
+  for (var k in lead) l[k] = lead[k];
+  delete l._pending;
+  var found = false;
+  for (var i = 0; i < arr.length; i++) {
+    if (arr[i].id === l.id) { arr[i] = l; found = true; break; }
+  }
+  if (!found) arr.push(l);
+  try { localStorage.setItem('cn_pending_leads', JSON.stringify(arr)); } catch (e) {}
+  invalidateCache('leads');
+}
+function removePendingLead(id) {
+  var arr = getPendingLeads();
+  arr = arr.filter(function(l) { return l.id !== id; });
+  try { localStorage.setItem('cn_pending_leads', JSON.stringify(arr)); } catch (e) {}
+  invalidateCache('leads');
 }
 
 /* ========================= CLOUD (SUPABASE) ========================= */
@@ -1227,8 +1264,14 @@ const App = {
       badge.className = 'sync-badge sync-offline';
       text.textContent = 'Offline';
     } else {
-      badge.className = 'sync-badge sync-online';
-      text.textContent = 'Cloud';
+      var pq = getPendingLeads();
+      if (pq.length > 0) {
+        badge.className = 'sync-badge sync-offline';
+        text.textContent = pq.length + ' to push';
+      } else {
+        badge.className = 'sync-badge sync-online';
+        text.textContent = 'Cloud';
+      }
     }
   },
 
@@ -1362,6 +1405,34 @@ const App = {
 
   generateLeadId() {
     return 'lead-' + Date.now() + '-' + Math.random().toString(36).slice(2,8);
+  },
+
+  async pushPendingLeads() {
+    var pending = getPendingLeads();
+    if (pending.length === 0) { this.toast('Nothing to push — no offline leads', 'info'); return; }
+    if (!navigator.onLine) { this.toast('You are offline — connect to the internet first', 'error'); return; }
+    this.toast('Pushing ' + pending.length + ' lead(s) to the database...', 'info');
+    var pushed = 0, failed = 0;
+    for (var i = 0; i < pending.length; i++) {
+      var l = pending[i];
+      delete l._pending;
+      l.syncStatus = 'Synced';
+      l.syncedAt = new Date().toISOString();
+      l.updatedAt = l.updatedAt || new Date().toISOString();
+      try {
+        await Cloud.upsert('leads', l);
+        removePendingLead(l.id);
+        pushed++;
+      } catch (e) {
+        failed++;
+      }
+    }
+    invalidateCache('leads');
+    if (failed === 0) this.toast(pushed + ' lead(s) pushed to database ✓', 'success');
+    else this.toast(pushed + ' pushed, ' + failed + ' still pending (network error)', 'error');
+    Dashboard.render();
+    Leads.render();
+    this.updateSyncBadge();
   }
 };
 
@@ -1849,17 +1920,30 @@ const Scanner = {
     const result = Parser.parse(decodedText);
     const fields = result.fields;
 
-    // Read printed text on the badge (name, company...) and merge it in.
-    // Data from the QR code always wins over OCR text.
+    // Read printed text on the badge (name, company, badge number, visitor
+    // category) and store it APART from the QR data. Data from the QR code
+    // always wins over OCR text for overlapping fields.
+    var badgeOcrText = '';
     if (frameCanvas && navigator.onLine) {
       try {
         document.getElementById('scanStatus').textContent = '✓ Badge scanned! Reading badge text...';
         var ocrText = await this.ocrFrame(frameCanvas);
         if (ocrText && ocrText.trim()) {
+          badgeOcrText = ocrText;
+          // Pattern-based fields (email/phones/website) are safe on badge
+          // text — they only match explicit email/phone/URL patterns
           var textFields = CardScanner.parseCardText(ocrText);
-          ['name','company','designation','email','phone'].forEach(function(k) {
+          ['email','phone','phone2','phone3','phone4','phone5','website'].forEach(function(k) {
             if (!fields[k] && textFields[k]) fields[k] = textFields[k];
           });
+          // Badge-printed info: visitor name, company, badge number
+          // (e.g. EPE00950 under the QR) and visitor category
+          // (EXHIBITOR / VISITOR / ... in the footer bar)
+          var badge = this.parseBadgePrintedText(ocrText);
+          if (badge.badgeNumber && !fields.badgeId) fields.badgeId = badge.badgeNumber;
+          if (badge.visitorType && !fields.visitorType) fields.visitorType = badge.visitorType;
+          if (badge.name && !fields.name) fields.name = badge.name;
+          if (badge.company && !fields.company) fields.company = badge.company;
         }
       } catch(e) {
         console.warn('Badge text OCR failed:', e);
@@ -1873,7 +1957,81 @@ const Scanner = {
     this.showResult(decodedText, fields, dup);
 
     // Auto-fill the manual form with parsed data
-    ManualForm.prefillFromScan(decodedText, fields, dup);
+    ManualForm.prefillFromScan(decodedText, fields, dup, badgeOcrText);
+  },
+
+  /** Parse printed info from a badge frame's OCR text: visitor name,
+   *  company, badge number (e.g. EPE00950) and visitor category
+   *  (EXHIBITOR / VISITOR / ...). Designed for the common expo badge
+   *  layout: NAME / COMPANY / [QR] / BADGE NUMBER / CATEGORY. Only fills
+   *  values that pass strict sanity checks — never guesses wildly. */
+  parseBadgePrintedText(text) {
+    var out = {};
+    var lines = text.split(/\r?\n/).map(function(s){ return s.trim(); })
+      .filter(function(s){ return s.length > 0; });
+    if (lines.length === 0) return out;
+
+    // --- Visitor category: a lone keyword line (EXHIBITOR, VISITOR...) ---
+    var catWords = ['EXHIBITOR','VISITOR','DELEGATE','VIP','PRESS','MEDIA','SPEAKER','SPONSOR','PARTNER','ORGANISER','ORGANIZER','STAFF'];
+    for (var i = 0; i < lines.length; i++) {
+      var up = lines[i].toUpperCase().replace(/[^A-Z ]/g, '').trim();
+      if (catWords.indexOf(up) >= 0) {
+        out.visitorType = up.charAt(0) + up.slice(1).toLowerCase();
+        break;
+      }
+    }
+
+    // --- Badge number: own line, 2-5 letters + 4-6 digits (EPE00950) ---
+    var numIdx = -1;
+    for (var j = 0; j < lines.length; j++) {
+      if (/^[A-Z]{2,5}[0-9]{4,6}$/.test(lines[j])) {
+        out.badgeNumber = lines[j];
+        numIdx = j;
+        break;
+      }
+    }
+
+    // --- Name and company ---
+    var noise = /(electronica|productronica|m\u00fcnchen|munchen|messe|september|20\d\d|elcina|biec|hall |stall |sep |inviting|global platform|host state|partner)/i;
+    var isNameish = function(s) {
+      var letters = s.replace(/[^A-Za-z ]/g, '').trim();
+      if (!letters || letters.length < 3) return false;
+      var words = letters.split(/\s+/);
+      if (words.length < 2 || words.length > 5) return false;
+      if (noise.test(s)) return false;
+      if (/[0-9]/.test(s)) return false;
+      return true;
+    };
+
+    if (numIdx >= 2) {
+      // Layout: NAME / COMPANY / [QR area] / BADGE NUMBER
+      var compCand = lines[numIdx - 1];
+      var nameCand = lines[numIdx - 2];
+      if (isNameish(nameCand) && isNameish(compCand)) {
+        out.name = nameCand;
+        out.company = compCand;
+      }
+    }
+    if (!out.name) {
+      // Fallback: first two ALL-CAPS name-like lines after noise filtering
+      var found = [];
+      for (var k = 0; k < lines.length && found.length < 2; k++) {
+        if (isNameish(lines[k]) && lines[k] === lines[k].toUpperCase()) found.push(lines[k]);
+      }
+      if (found.length === 2) {
+        out.name = found[0];
+        out.company = found[1];
+      } else if (found.length === 1) {
+        out.company = found[0];
+      }
+    }
+    // Title-case the name (keep 1-2 letter initials uppercase: ANIL KUMAR KS → Anil Kumar KS)
+    if (out.name) {
+      out.name = out.name.toLowerCase().replace(/\b\w+/g, function(w) {
+        return w.length <= 2 ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1);
+      });
+    }
+    return out;
   },
 
   /** Grab the current camera frame from the scanner video element. */
@@ -1947,7 +2105,8 @@ const Scanner = {
   showResult(raw, fields, dup) {
     const fieldLabels = {
       name:'Name', company:'Company', designation:'Designation',
-      phone:'Phone', email:'Email', country:'Country', city:'City', badgeId:'Badge ID'
+      phone:'Phone', email:'Email', country:'Country', city:'City',
+      badgeId:'Badge ID', visitorType:'Visitor Type'
     };
     let html = '<div class="scan-result-card"><h4>✓ Parsed Badge Data</h4>';
     if (Object.keys(fields).length === 0) {
@@ -3255,7 +3414,7 @@ const ManualForm = {
         <div class="form-group">
           <label>Visitor Type</label>
           <select id="f_visitorType">
-            ${(App.getDropdownOptions('visitorTypes') || DEFAULT_VISITOR_TYPES).map(t => `<option ${data.visitorType===t?'selected':''}>${t}</option>`).join('')}
+            ${(() => { var vOpts = (App.getDropdownOptions('visitorTypes') || DEFAULT_VISITOR_TYPES).slice(); if (data.visitorType && vOpts.map(function(o){ return o.toLowerCase(); }).indexOf(data.visitorType.toLowerCase()) < 0) vOpts.unshift(data.visitorType); return vOpts.map(t => `<option ${data.visitorType===t?'selected':''}>${t}</option>`).join(''); })()}
           </select>
         </div>
         ${raw ? `
@@ -3271,7 +3430,7 @@ const ManualForm = {
         </div>` : '<input type="hidden" id="f_rawBadge" value="">'}
         <input type="hidden" id="f_captureDate" value="${esc(captureDate)}">
         <div class="form-group">
-          <label style="font-size:15px;font-weight:700;color:var(--primary);margin-bottom:8px">📋 Raw OCR Data — Visiting Card Scan</label>
+          <label style="font-size:15px;font-weight:700;color:var(--primary);margin-bottom:8px">📋 Raw OCR / Badge Text — from scans</label>
           <div class="ocr-collapse-header" id="ocrCollapseHeader" onclick="ManualForm.toggleOcrCollapse()">
             <span>Tap to view / edit raw OCR text</span>
             <span class="chevron">▼</span>
@@ -3372,8 +3531,8 @@ const ManualForm = {
       if (f.phone5) this.addPhoneField(f.phone5);    }
   },
 
-  prefillFromScan(raw, fields, dup) {
-    this.currentScanData = { raw, fields };
+  prefillFromScan(raw, fields, dup, ocrText) {
+    this.currentScanData = { raw, fields, ocrText: ocrText || '' };
     // Switch to manual form view
     App.navigate('manual');
   },
@@ -3579,26 +3738,37 @@ const ManualForm = {
       leadData.syncedAt = '';
     }
 
-    await dbPut('leads', leadData);
-    // Push to cloud immediately (will be queued if offline)
-    Cloud.sync();
+    var savedOffline = false;
+    if (!navigator.onLine) {
+      addPendingLead(leadData);
+      savedOffline = true;
+    } else {
+      try {
+        await dbPut('leads', leadData);
+      } catch (e) {
+        // Cloud unreachable — queue locally for a manual push later
+        addPendingLead(leadData);
+        savedOffline = true;
+      }
+    }
+    if (!savedOffline) Cloud.sync();
 
     // Clear scan data
     this.currentScanData = null;
     editLeadId = null;
 
     // Show success screen
-    this.showSuccess(isEdit ? 'updated' : 'saved');
+    this.showSuccess(isEdit ? 'updated' : 'saved', savedOffline);
   },
 
-  showSuccess(action) {
+  showSuccess(action, savedOffline) {
     document.getElementById('manualFormContainer').innerHTML = `
       <div class="save-success">
         <div class="ss-icon">✅</div>
         <h2>LEAD ${action.toUpperCase()}</h2>
         <p>The lead has been ${action} successfully.</p>
         <p style="margin-top:8px;font-size:13px;color:var(--text-muted)">
-          ⏳ Saved — syncing to cloud in background
+          ${savedOffline ? '📱 Saved OFFLINE — ' + getPendingLeads().length + ' lead(s) waiting. Use Push to Database on the Dashboard when back online.' : '⏳ Saved — syncing to cloud in background'}
         </p>
       </div>
       <div class="form-actions" style="flex-direction:column;gap:10px">
@@ -3649,7 +3819,7 @@ const Leads = {
     }
 
     container.innerHTML = leads.map(l => `
-      <div class="lead-item" onclick="Leads.showDetail('${l.id}')">
+      <div class="lead-item" ${l._pending ? 'style="border:2px solid var(--warning);background:rgba(255,193,7,.08)"' : ''} onclick="Leads.showDetail('${l.id}')">
         <div class="li-top">
           <div>
             <div class="li-name">${esc(l.name)}</div>
@@ -3660,7 +3830,7 @@ const Leads = {
         <div class="li-meta">
           ${l.priority ? `<span class="lead-tag" style="${App.priorityStyle(l.priority)}">${l.priority}</span>` : ''}
           ${l.interest ? `<span class="lead-tag interest">${esc(l.interest)}</span>` : ''}
-          <span class="lead-tag sync ${(l.syncStatus||'pending').toLowerCase()}">${l.syncStatus||'Pending'}</span>
+          ${l._pending ? '<span class="lead-tag" style="background:#fff3cd;color:#856404;font-weight:700">⏳ Pending push</span>' : `<span class="lead-tag sync ${(l.syncStatus||'pending').toLowerCase()}">${l.syncStatus||'Pending'}</span>`}
         </div>
         <div class="li-bottom">
           <span>${esc(l.date)} ${esc(l.time||'')} · ${esc(l.salesperson||'')}</span>
@@ -3855,6 +4025,14 @@ const Leads = {
     if (!confirm('Move this lead to trash?')) return;
     var lead = await dbGet('leads', id);
     if (!lead) return;
+    // Offline-captured lead — simply remove it from the pending queue
+    if (lead._pending) {
+      removePendingLead(id);
+      App.toast('Offline lead deleted', 'success');
+      App.navigate('leads');
+      Leads.render();
+      return;
+    }
     lead.trashed = true;
     lead.trashedAt = new Date().toISOString();
     lead.updatedAt = new Date().toISOString();
@@ -4005,6 +4183,19 @@ const Dashboard = {
     document.getElementById('statCold').textContent = leads.filter(l => l.priority === p2).length;
     document.getElementById('statToday').textContent = leads.filter(l => l.date === today).length;
     document.getElementById('statFollowup').textContent = leads.filter(l => l.followUp === 'Yes').length;
+
+    // Offline pending-push banner
+    var banner = document.getElementById('pendingPushBanner');
+    if (banner) {
+      var pq = getPendingLeads();
+      if (pq.length > 0) {
+        banner.style.display = 'flex';
+        var cntEl = document.getElementById('pendingCountText');
+        if (cntEl) cntEl.textContent = pq.length + ' lead' + (pq.length > 1 ? 's' : '') + ' saved offline — pending push';
+      } else {
+        banner.style.display = 'none';
+      }
+    }
 
     this.renderPriorityChart(leads);
     this.renderInterestChart(leads);

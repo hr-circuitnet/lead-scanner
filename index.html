@@ -400,6 +400,14 @@ a{text-decoration:none;color:inherit}
       <h2 id="dashGreeting">Dashboard</h2>
       <p id="dashDate"></p>
     </div>
+    <div id="pendingPushBanner" style="display:none;background:#fff3cd;border:1px solid #ffc107;border-radius:10px;padding:12px 14px;margin-bottom:14px;align-items:center;gap:10px">
+      <span style="font-size:22px">⏳</span>
+      <div style="flex:1">
+        <div style="font-weight:700;font-size:14px;color:#856404" id="pendingCountText">Leads saved offline</div>
+        <div style="font-size:12px;color:#856404;opacity:.85">These leads are on this device only — push them to the central database.</div>
+      </div>
+      <button class="btn btn-primary" style="padding:10px 16px;white-space:nowrap" onclick="App.pushPendingLeads()">⬆ Push to Database</button>
+    </div>
     <div class="stat-grid">
       <div class="stat-card today"><div class="stat-label">Total Leads</div><div class="stat-value" id="statTotal">0</div></div>
       <div class="stat-card followup"><div class="stat-label">Follow-ups</div><div class="stat-value" id="statFollowup">0</div></div>
@@ -667,11 +675,11 @@ a{text-decoration:none;color:inherit}
     <div class="form-card">
       <h3>🔄 Recent Updates</h3>
       <div style="font-size:12px;color:#555;line-height:1.7">
+        <p style="margin:0 0 8px"><b>v53</b> — Badge scans now capture the printed badge information — visitor name, company, badge number and visitor category — and store it separately from the QR code data.</p>
+        <p style="margin:0 0 8px"><b>v52</b> — Offline capture: leads scanned while offline are saved locally, highlighted as pending, and pushed to the central database with one button when back online.</p>
         <p style="margin:0 0 8px"><b>v51</b> — Dashboard buttons updated: Export replaced with Scan Visiting Card; order is now Scan Visiting Card, Scan Badge, Manual Entry, View Leads.</p>
         <p style="margin:0 0 8px"><b>v50</b> — Home screen app icon replaced with the company logo; the role badge next to the user name now shows the user's actual role.</p>
         <p style="margin:0 0 8px"><b>v49</b> — Fixed deleted leads resurrecting: deletion/trash state is now applied from the central settings record on every read, so a deleted lead stays deleted on every device regardless of table schema.</p>
-        <p style="margin:0 0 8px"><b>v48</b> — Cloud-direct data layer: no local storage at all. Every page fetches live data from the central database and every change is written to it immediately — deleted leads and users can never reappear.</p>
-        <p style="margin:0 0 8px"><b>v47</b> — Complete sync engine overhaul: serialized queue (no more race conditions), fetch timeouts (no more frozen sync), tombstones for deleted/trashed leads, admin event applies to all users, users no longer mass-pushed (fixes role resets permanently).</p>
       </div>
     </div>
 
