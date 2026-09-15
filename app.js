@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v53';
+const APP_VERSION = 'circuitnet-v54';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -1962,9 +1962,10 @@ const Scanner = {
 
   /** Parse printed info from a badge frame's OCR text: visitor name,
    *  company, badge number (e.g. EPE00950) and visitor category
-   *  (EXHIBITOR / VISITOR / ...). Designed for the common expo badge
-   *  layout: NAME / COMPANY / [QR] / BADGE NUMBER / CATEGORY. Only fills
-   *  values that pass strict sanity checks — never guesses wildly. */
+   *  (EXHIBITOR / VISITOR / ...). Handles the expo badge layout where the
+   *  visitor NAME spans 1-2 printed lines and the COMPANY spans 1-2
+   *  printed lines above the QR code, with the badge number printed
+   *  below it. Multi-line names and companies are joined into one. */
   parseBadgePrintedText(text) {
     var out = {};
     var lines = text.split(/\r?\n/).map(function(s){ return s.trim(); })
@@ -1992,7 +1993,7 @@ const Scanner = {
     }
 
     // --- Name and company ---
-    var noise = /(electronica|productronica|m\u00fcnchen|munchen|messe|september|20\d\d|elcina|biec|hall |stall |sep |inviting|global platform|host state|partner)/i;
+    var noise = /(electronica|productronica|münchen|munchen|messe|september|20\d\d|elcina|biec|hall |stall |sep |inviting|global platform|host state|partner)/i;
     var isNameish = function(s) {
       var letters = s.replace(/[^A-Za-z ]/g, '').trim();
       if (!letters || letters.length < 3) return false;
@@ -2002,29 +2003,74 @@ const Scanner = {
       if (/[0-9]/.test(s)) return false;
       return true;
     };
+    // A lone ALL-CAPS word is a continuation line: a name initial
+    // ("KS"), a surname ("PRIYA") or a company brand word ("CIRCUITNET")
+    var isLoneCapsWord = function(s) {
+      return /^[A-Z]{2,}$/.test(s) && !noise.test(s);
+    };
+    var isBodyLine = function(s) {
+      if (isNameish(s)) return true;
+      return isLoneCapsWord(s) && catWords.indexOf(s) < 0;
+    };
+    var hasCompanyKeyword = function(s) {
+      var short = ['PVT','LTD','LLP','LLC','CORP'];
+      var long = ['PRIVATE','LIMITED','INDIA','TECHNOLOGIES','TECHNOLOGY','SOLUTIONS','SYSTEMS','INDUSTRIES','ENTERPRISES','INTERNATIONAL','CORPORATION','ELECTRONICS','ELECTRICALS','ENGINEERING','GROUP','SERVICES','INFOTECH','MOTORS','STEEL','POWER','ENERGY','PHARMA','HOLDINGS','COMPONENTS','AUTOMATION','PLASTICS','CHEMICALS','LOGISTICS','SOFTWARE','DIGITAL','CONSULTANCY','TRADERS','DISTRIBUTORS','MANUFACTURING','LABS','WORKS'];
+      var u = s.toUpperCase();
+      for (var a = 0; a < short.length; a++) { if (new RegExp('\\b' + short[a] + '\\b').test(u)) return true; }
+      for (var b = 0; b < long.length; b++) { if (u.indexOf(long[b]) >= 0) return true; }
+      return false;
+    };
 
-    if (numIdx >= 2) {
-      // Layout: NAME / COMPANY / [QR area] / BADGE NUMBER
-      var compCand = lines[numIdx - 1];
-      var nameCand = lines[numIdx - 2];
-      if (isNameish(nameCand) && isNameish(compCand)) {
-        out.name = nameCand;
-        out.company = compCand;
+    // Collect the printed block: consecutive body lines ending right
+    // above the badge number (the QR between them rarely OCRs to text)
+    var body = [];
+    if (numIdx > 0) {
+      for (var b2 = numIdx - 1; b2 >= 0; b2--) {
+        if (isBodyLine(lines[b2])) body.unshift(lines[b2]);
+        else break;
       }
     }
-    if (!out.name) {
-      // Fallback: first two ALL-CAPS name-like lines after noise filtering
-      var found = [];
-      for (var k = 0; k < lines.length && found.length < 2; k++) {
-        if (isNameish(lines[k]) && lines[k] === lines[k].toUpperCase()) found.push(lines[k]);
+    if (body.length < 2) {
+      // No badge number (or a thin block) — scan the whole text for
+      // body lines instead
+      var scan = [];
+      for (var c = 0; c < lines.length; c++) {
+        if (isBodyLine(lines[c])) scan.push(lines[c]);
       }
-      if (found.length === 2) {
-        out.name = found[0];
-        out.company = found[1];
-      } else if (found.length === 1) {
-        out.company = found[0];
-      }
+      if (scan.length > body.length) body = scan;
     }
+    if (body.length === 0) return out;
+
+    // Split the block: name = top 1-2 lines, company = the rest (1-2+ lines)
+    var n = body.length;
+    var kwFirst = -1;
+    for (var q = 0; q < n; q++) {
+      if (hasCompanyKeyword(body[q])) { kwFirst = q; break; }
+    }
+    // A lone word directly above the first keyword line is usually a
+    // company brand word (e.g. "CIRCUITNET" over "TECHNOLOGIES INDIA
+    // PVT LTD") — attach it to the company, but only if the name keeps
+    // at least two words
+    if (kwFirst >= 2 && kwFirst <= 3 && isLoneCapsWord(body[kwFirst - 1]) &&
+        body[kwFirst - 1].length >= 4) {
+      var nameWordsAfterExt = body.slice(0, kwFirst - 1).join(' ').split(/\s+/)
+        .filter(function(w){ return w.length > 0; }).length;
+      if (nameWordsAfterExt >= 2) kwFirst -= 1;
+    }
+    var nameLines;
+    if (n === 1) {
+      nameLines = (kwFirst === 0) ? 0 : 1;
+    } else if (kwFirst >= 0 && kwFirst <= 2) {
+      // First line carrying a company keyword starts the company block
+      nameLines = kwFirst;
+    } else {
+      // Layout default: 2 lines -> 1+1, 3 -> 1+2, 4+ -> 2+rest
+      nameLines = (n >= 4) ? 2 : 1;
+    }
+    if (nameLines >= n) nameLines = n - 1;
+    if (nameLines > 0) out.name = body.slice(0, nameLines).join(' ');
+    if (nameLines < n) out.company = body.slice(nameLines).join(' ');
+
     // Title-case the name (keep 1-2 letter initials uppercase: ANIL KUMAR KS → Anil Kumar KS)
     if (out.name) {
       out.name = out.name.toLowerCase().replace(/\b\w+/g, function(w) {
