@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v56';
+const APP_VERSION = 'circuitnet-v57';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -325,7 +325,7 @@ const Cloud = {
     var optionalCols = ['capturedate', 'rawocrdata', 'phone2', 'phone3', 'phone4', 'phone5',
       'address', 'state', 'pincode', 'department', 'email2', 'linkedin', 'capturedate'];
     // Try full payload first
-    var maxRetries = 10;
+    var maxRetries = 15;
     for (var attempt = 0; attempt <= maxRetries; attempt++) {
       var resp = await this.fetchT(SB_REST + '/' + table + '?on_conflict=' + col, {
         method: 'POST',
@@ -341,7 +341,7 @@ const Cloud = {
         throw new Error('upsert ' + table + ': ' + resp.status + ' ' + body);
       }
       // Extract missing column name and strip it
-      var m = body.match(/'([a-z]+)' column/);
+      var m = body.match(/'([a-z0-9_]+)' column/);
       if (!m) throw new Error('upsert ' + table + ': ' + resp.status + ' ' + body);
       this.log('⚠️ Column ' + m[1] + ' not in Supabase schema — retrying without it');
       delete payload[m[1]];
@@ -359,7 +359,7 @@ const Cloud = {
       return lr;
     });
     // Retry loop for missing columns
-    var maxRetries = 10;
+    var maxRetries = 15;
     for (var attempt = 0; attempt <= maxRetries; attempt++) {
       var resp = await this.fetchT(SB_REST + '/' + table + '?on_conflict=' + col, {
         method: 'POST',
@@ -371,7 +371,7 @@ const Cloud = {
       if (resp.status !== 400 || body.indexOf('Could not find the') < 0) {
         throw new Error('upsertBatch ' + table + ': ' + resp.status + ' ' + body);
       }
-      var m = body.match(/'([a-z]+)' column/);
+      var m = body.match(/'([a-z0-9_]+)' column/);
       if (!m) throw new Error('upsertBatch ' + table + ': ' + resp.status + ' ' + body);
       this.log('⚠️ Batch: Column ' + m[1] + ' not in schema — retrying without it');
       lowerRows.forEach(function(r){ delete r[m[1]]; });
@@ -399,7 +399,7 @@ const Cloud = {
     for (var k in payload) {
       if (payload[k] === null || payload[k] === undefined || payload[k] === '') delete payload[k];
     }
-    var maxRetries = 10;
+    var maxRetries = 15;
     for (var attempt = 0; attempt <= maxRetries; attempt++) {
       var resp = await this.fetchT(SB_REST + '/' + table, {
         method: 'POST',
@@ -411,7 +411,7 @@ const Cloud = {
       if (resp.status !== 400 || body.indexOf('Could not find the') < 0) {
         throw new Error('insert ' + table + ': ' + resp.status + ' ' + body);
       }
-      var m = body.match(/'([a-z]+)' column/);
+      var m = body.match(/'([a-z0-9_]+)' column/);
       if (!m) throw new Error('insert ' + table + ': ' + resp.status + ' ' + body);
       this.log('⚠️ Column ' + m[1] + ' not in Supabase schema — retrying without it');
       delete payload[m[1]];
@@ -1524,7 +1524,10 @@ const App = {
     invalidateCache('leads');
     if (failed === 0) this.toast(pushed + ' lead(s) pushed to database ✓', 'success');
     else {
-      var detail = (firstErr || 'network error').replace(/\s+/g, ' ').slice(0, 110);
+      var detail = (firstErr || 'network error');
+      var dm = detail.match(/"message":"([^"]+)"/);
+      if (dm) detail = dm[1];
+      detail = detail.replace(/\s+/g, ' ').slice(0, 110);
       this.toast(pushed + ' pushed, ' + failed + ' still pending — ' + detail, 'error', 8000);
       Cloud.log('⚠️ Push finished with ' + failed + ' failure(s). Last error: ' + detail);
     }
