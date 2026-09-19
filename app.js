@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v54';
+const APP_VERSION = 'circuitnet-v56';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -304,6 +304,11 @@ const Cloud = {
       throw new Error('fetchAll ' + table + ': ' + resp.status + ' ' + body);
     }
     var rows = await resp.json();
+    // Keep an offline copy of the user list so the team can still sign
+    // in on WiFi networks that block the central database
+    if (table === 'users' && Array.isArray(rows) && rows.length) {
+      try { localStorage.setItem('cn_user_cache', JSON.stringify(rows.map(function(r){ return toCamelKeys(r); }))); } catch (e) {}
+    }
     // Convert lowercase keys back to camelCase
     return rows.map(function(r){ return toCamelKeys(r); });
   },
@@ -385,6 +390,33 @@ const Cloud = {
       throw new Error('update ' + table + ': ' + resp.status + ' ' + body);
     }
     return true;
+  },
+
+  /** Plain INSERT (no on_conflict) — used as a fallback for pushing
+   *  offline leads when the upsert's conflict clause is rejected. */
+  async insertRow(table, row) {
+    var payload = toLowerKeys(row);
+    for (var k in payload) {
+      if (payload[k] === null || payload[k] === undefined || payload[k] === '') delete payload[k];
+    }
+    var maxRetries = 10;
+    for (var attempt = 0; attempt <= maxRetries; attempt++) {
+      var resp = await this.fetchT(SB_REST + '/' + table, {
+        method: 'POST',
+        headers: sbHeaders({ 'Prefer': 'return=minimal' }),
+        body: JSON.stringify(payload)
+      });
+      if (resp.ok) return true;
+      var body = await resp.text();
+      if (resp.status !== 400 || body.indexOf('Could not find the') < 0) {
+        throw new Error('insert ' + table + ': ' + resp.status + ' ' + body);
+      }
+      var m = body.match(/'([a-z]+)' column/);
+      if (!m) throw new Error('insert ' + table + ': ' + resp.status + ' ' + body);
+      this.log('⚠️ Column ' + m[1] + ' not in Supabase schema — retrying without it');
+      delete payload[m[1]];
+    }
+    throw new Error('insert ' + table + ': failed after ' + maxRetries + ' retries');
   },
 
   async deleteRow(table, id) {
@@ -976,10 +1008,28 @@ const App = {
     var errEl = document.getElementById('loginError');
     errEl.textContent = '';
     if (!username) { errEl.textContent = 'Enter username'; return; }
-    // Look up user by username (case-insensitive)
+    // Look up user by username (case-insensitive). Retry once on flaky
+    // WiFi, then fall back to the cached user list so the team can
+    // still sign in on networks that block the central database.
     var users = [];
-    try { users = await dbGetAll('users'); }
-    catch (e) { errEl.textContent = 'Network error — check your connection and try again'; return; }
+    var fromCache = false;
+    for (var attempt = 1; attempt <= 2 && !users.length; attempt++) {
+      try { users = await dbGetAll('users'); }
+      catch (e) {
+        if (attempt < 2) {
+          errEl.textContent = 'Connecting to database... (retrying)';
+          await new Promise(function(r){ setTimeout(r, 2000); });
+          errEl.textContent = '';
+        }
+      }
+    }
+    if (!users.length) {
+      try {
+        var cached = JSON.parse(localStorage.getItem('cn_user_cache') || '[]');
+        if (cached.length) { users = cached; fromCache = true; }
+      } catch (e2) {}
+    }
+    if (!users.length) { await this.showLoginNetworkError(errEl); return; }
     var user = users.find(function(u){ return u.username && u.username.toLowerCase() === username.toLowerCase() && u.active; });
     if (!user) { errEl.textContent = 'Invalid User ID or password'; return; }
     if (user.password !== pass) { errEl.textContent = 'Invalid User ID or password'; return; }
@@ -991,6 +1041,32 @@ const App = {
     localStorage.setItem('cn_user', JSON.stringify(user));
     this.showApp();
     this.toast('Welcome, ' + user.name + (user.role === 'admin' ? ' (Admin)' : ''), 'success');
+    if (fromCache) {
+      this.toast('Signed in from offline user cache — connect to internet to sync', 'info');
+    }
+  },
+
+  /** Explain why login could not reach the database: is this WiFi
+   *  blocking the database, or is there no internet at all? */
+  async showLoginNetworkError(errEl) {
+    var general = false;
+    var db = false;
+    try {
+      var r = await Cloud.fetchT('https://www.gstatic.com/generate_204', { cache: 'no-store' }, 6000);
+      general = r.ok;
+    } catch (e) {}
+    try {
+      // Any HTTP response (even 401) means the database is reachable
+      await Cloud.fetchT(SB_REST + '/', { method: 'GET' }, 6000);
+      db = true;
+    } catch (e2) {}
+    if (general && !db) {
+      errEl.textContent = 'This WiFi network is blocking access to the central database. Turn off WiFi and use mobile data, or switch to another network.';
+    } else if (!general) {
+      errEl.textContent = 'No internet on this network. If this is a hotel / public WiFi, open any website in your browser, complete the WiFi login page, then try again.';
+    } else {
+      errEl.textContent = 'Connection is unstable right now. Please tap Login to try again.';
+    }
   },
 
   /**
@@ -1395,12 +1471,12 @@ const App = {
     return d.toISOString().slice(0,10);
   },
 
-  toast(msg, type = '') {
+  toast(msg, type = '', ms = 3000) {
     const t = document.getElementById('toast');
     t.textContent = msg;
     t.className = 'toast show ' + type;
     clearTimeout(this._toastTimer);
-    this._toastTimer = setTimeout(() => t.classList.remove('show'), 3000);
+    this._toastTimer = setTimeout(() => t.classList.remove('show'), ms);
   },
 
   generateLeadId() {
@@ -1412,24 +1488,46 @@ const App = {
     if (pending.length === 0) { this.toast('Nothing to push — no offline leads', 'info'); return; }
     if (!navigator.onLine) { this.toast('You are offline — connect to the internet first', 'error'); return; }
     this.toast('Pushing ' + pending.length + ' lead(s) to the database...', 'info');
-    var pushed = 0, failed = 0;
+    var pushed = 0, failed = 0, firstErr = '';
     for (var i = 0; i < pending.length; i++) {
       var l = pending[i];
       delete l._pending;
+      // Send the exact same payload shape a successful online save
+      // sends — no extra timestamp fields the database may reject
       l.syncStatus = 'Synced';
-      l.syncedAt = new Date().toISOString();
+      delete l.syncedAt;
       l.updatedAt = l.updatedAt || new Date().toISOString();
+      var ok = false;
       try {
         await Cloud.upsert('leads', l);
+        ok = true;
+      } catch (e) {
+        Cloud.log('⚠️ Push upsert failed for ' + l.id + ': ' + (e && e.message ? e.message : e));
+        // Fallback: plain insert — works when the upsert's conflict
+        // clause is the problem (e.g. no unique constraint on id)
+        try {
+          await Cloud.insertRow('leads', l);
+          ok = true;
+        } catch (e2) {
+          Cloud.log('⚠️ Push insert also failed: ' + (e2 && e2.message ? e2.message : e2));
+          if (!firstErr) firstErr = String((e2 && e2.message) || (e && e.message) || e2 || e);
+        }
+      }
+      if (ok) {
         removePendingLead(l.id);
         pushed++;
-      } catch (e) {
+        Cloud.log('✅ Pushed lead ' + l.id + ' (' + l.name + ') to database');
+      } else {
         failed++;
       }
     }
     invalidateCache('leads');
     if (failed === 0) this.toast(pushed + ' lead(s) pushed to database ✓', 'success');
-    else this.toast(pushed + ' pushed, ' + failed + ' still pending (network error)', 'error');
+    else {
+      var detail = (firstErr || 'network error').replace(/\s+/g, ' ').slice(0, 110);
+      this.toast(pushed + ' pushed, ' + failed + ' still pending — ' + detail, 'error', 8000);
+      Cloud.log('⚠️ Push finished with ' + failed + ' failure(s). Last error: ' + detail);
+    }
     Dashboard.render();
     Leads.render();
     this.updateSyncBadge();
@@ -3792,9 +3890,11 @@ const ManualForm = {
       try {
         await dbPut('leads', leadData);
       } catch (e) {
-        // Cloud unreachable — queue locally for a manual push later
+        // Cloud unreachable or rejected the lead — queue locally for a
+        // manual push later, and log the real reason
         addPendingLead(leadData);
         savedOffline = true;
+        Cloud.log('⚠️ Cloud save failed — lead queued offline: ' + (e && e.message ? e.message : e));
       }
     }
     if (!savedOffline) Cloud.sync();
