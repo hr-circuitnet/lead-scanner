@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v58';
+const APP_VERSION = 'circuitnet-v60';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -754,6 +754,8 @@ const App = {
     this.updateEventDisplay();
     this.initOnlineDetection();
     this.initServiceWorker();
+    // Auto-update: pick up newly deployed versions on every app open
+    this.autoUpdateCheck();
     // Pre-warm camera permission on first load so browser remembers it
     this.initCameraPermission();
     // Trap the browser Back button: stay in the app, go to Dashboard
@@ -824,6 +826,24 @@ const App = {
    * Force-clear all caches, unregister service worker, log out user,
    * then hard-reload the page. The user will see the login screen.
    */
+  /** Silent update check on every app open — fetches version.json from
+   *  the server (bypassing the cache) and force-updates if a new release
+   *  was deployed, so new versions reach every device without anyone
+   *  tapping Check for Updates. */
+  async autoUpdateCheck() {
+    try {
+      var resp = await fetch('version.json?t=' + Date.now(), { cache: 'no-store' });
+      if (!resp.ok) return;
+      var data = await resp.json();
+      var serverVersion = data.version || '';
+      if (serverVersion && serverVersion !== APP_VERSION) {
+        this.toast('New version found — updating to ' + serverVersion + '...', 'success');
+        var self = this;
+        setTimeout(function() { self.forceUpdate(); }, 1500);
+      }
+    } catch (e) { /* offline — try again on next open */ }
+  },
+
   async forceUpdate() {
     // 1. Clear ALL Cache API entries
     if ('caches' in window) {
@@ -3935,52 +3955,170 @@ const ManualForm = {
 
 /* ========================= LEADS LIST ========================= */
 /* ========================= CUSTOMER MASTER ========================= */
-/* One spreadsheet-style row per lead of the selected expo: Sl.No,
-   Customer, Visitor Name, Department, Mobile 1 / 2, Email, City, State,
-   Address, Website and Follow-up status. Single page, vertical scroll
-   bar on the right; tapping a row opens the lead details. */
+/* Excel-style sheet of every lead of the selected expo. Tap a header
+   to sort by that column; drag a column's edge to resize it (widths
+   are remembered); the follow-up status can be changed right in the
+   sheet with a dropdown; the bar under the table scrolls sideways to
+   reach all columns. Tapping a row opens the lead details. */
 const CustomerMaster = {
+  sortKey: '', sortDir: 1, _leads: null, _lastResize: 0, colWidths: null,
+  COLS: [
+    { key: 'slno',           label: 'Sl. No',      w: 50,  sortable: false },
+    { key: 'company',        label: 'Customer',     w: 200, sortable: true },
+    { key: 'name',           label: 'Visitor Name', w: 180, sortable: true },
+    { key: 'department',     label: 'Department',   w: 120, sortable: true },
+    { key: 'phone',          label: 'Mobile 1',     w: 130, sortable: true },
+    { key: 'phone2',         label: 'Mobile 2',     w: 130, sortable: true },
+    { key: 'email',          label: 'Email',        w: 180, sortable: true },
+    { key: 'city',           label: 'City',         w: 110, sortable: true },
+    { key: 'state',          label: 'State',       w: 110, sortable: true },
+    { key: 'address',        label: 'Address',     w: 180, sortable: true },
+    { key: 'website',        label: 'Website',     w: 160, sortable: true },
+    { key: 'followUpStatus', label: 'Follow-up',   w: 150, sortable: true }
+  ],
+
   async render() {
     var tbl = document.getElementById('cmTable');
     if (!tbl) return;
-    var leads = await Leads.getFiltered();
+    var self = this;
+    this._leads = await Leads.getFiltered();
+    var leads = this._leads.slice();
     var evtName = (App.currentEvent && App.currentEvent.name) ? App.currentEvent.name : 'Default Event';
     var sub = document.getElementById('cmSubtitle');
-    if (sub) sub.textContent = evtName + ' — ' + leads.length + ' customer' + (leads.length === 1 ? '' : 's') + ' · tap a row for full details';
+    if (sub) sub.textContent = evtName + ' — ' + leads.length + ' customer' + (leads.length === 1 ? '' : 's') + ' · tap a header to sort · drag column edges to resize · tap a row for details';
     if (leads.length === 0) {
       tbl.innerHTML = '<tr><td style="padding:24px;text-align:center;color:var(--text-muted)">No leads captured for this expo yet</td></tr>';
       return;
     }
+    if (this.sortKey) {
+      leads.sort(function (a, b) {
+        var av = String(a[self.sortKey] == null ? '' : a[self.sortKey]);
+        var bv = String(b[self.sortKey] == null ? '' : b[self.sortKey]);
+        if (!av && bv) return 1;
+        if (av && !bv) return -1;
+        return av.localeCompare(bv, undefined, { numeric: true, sensitivity: 'base' }) * self.sortDir;
+      });
+    }
+    // Column widths: remembered from the last drag, else defaults
+    if (!this.colWidths || this.colWidths.length !== this.COLS.length) {
+      this.colWidths = this.COLS.map(function (c) { return c.w; });
+      try {
+        var saved = JSON.parse(localStorage.getItem('cm_col_widths') || '[]');
+        if (saved.length === self.COLS.length) this.colWidths = saved;
+      } catch (e) { }
+    }
+        var escA = function (s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); };
+    var cell = function (v) { return (v === null || v === undefined || v === '') ? '<span style="color:var(--text-muted)">—</span>' : esc(v); };
+    // Header (sortable + resizer on every column)
+    var head = '';
+    for (var c = 0; c < this.COLS.length; c++) {
+      var col = this.COLS[c];
+      var arrow = '<span class="cm-sort-arrow" style="opacity:.35">⇅</span>';
+      if (this.sortKey === col.key) arrow = '<span class="cm-sort-arrow">' + (this.sortDir === 1 ? '▲' : '▼') + '</span>';
+      var attrs = col.sortable ? ' class="cm-sortable" onclick="CustomerMaster.sortBy(\'' + col.key + '\')"' : '';
+      head += '<th' + attrs + ' title="Sort by ' + escA(col.label) + '">' + esc(col.label) + arrow +
+        '<span class="cm-resizer" onpointerdown="CustomerMaster.startResize(event,' + c + ')"></span></th>';
+    }
+    // Rows (follow-up is a dropdown that saves straight to the database)
+    var statusOpts = App.getDropdownOptions('followUpStatuses') || DEFAULT_FOLLOWUP_STATUSES;
     var rows = '';
     for (var i = 0; i < leads.length; i++) {
       var l = leads[i];
       var st = (l.followUpStatus || '').trim();
-      var badge;
-      if (!st) badge = '<span style="color:var(--text-muted)">—</span>';
-      else if (st === 'Completed') badge = '<span class="cm-badge" style="background:#d4f7dc;color:#1a7f37">✓ ' + esc(st) + '</span>';
-      else if (st === 'In Progress') badge = '<span class="cm-badge" style="background:#dbeafe;color:#1d4ed8">⏳ ' + esc(st) + '</span>';
-      else if (st === 'Cancelled') badge = '<span class="cm-badge" style="background:#f1f1f1;color:#666">✕ ' + esc(st) + '</span>';
-      else badge = '<span class="cm-badge" style="background:#fff3cd;color:#996500">🔔 ' + esc(st) + '</span>';
+      var sel = '<select class="cm-select" onclick="event.stopPropagation()" onchange="event.stopPropagation();CustomerMaster.setFollowUp(\'' + l.id + '\', this.value)">' +
+        '<option value="">—</option>' +
+        statusOpts.map(function (s) { return '<option' + (st === s ? ' selected' : '') + ' value="' + escA(s) + '">' + esc(s) + '</option>'; }).join('') +
+        '</select>';
       rows += '<tr onclick="Leads.showDetail(\'' + l.id + '\')">' +
         '<td style="color:var(--text-muted)">' + (i + 1) + '</td>' +
-        '<td style="font-weight:600">' + esc(l.company || '') + '</td>' +
-        '<td>' + esc(l.name || '') + (l.designation ? ' <span style="color:var(--text-muted)">· ' + esc(l.designation) + '</span>' : '') + '</td>' +
-        '<td>' + esc(l.department || '—') + '</td>' +
-        '<td>' + esc(l.phone || '') + '</td>' +
-        '<td>' + esc(l.phone2 || '') + '</td>' +
-        '<td>' + esc(l.email || '') + '</td>' +
-        '<td>' + esc(l.city || '—') + '</td>' +
-        '<td>' + esc(l.state || '—') + '</td>' +
-        '<td>' + esc(l.address || '—') + '</td>' +
-        '<td>' + esc(l.website || '') + '</td>' +
-        '<td>' + badge + '</td>' +
+        '<td title="' + escA(l.company) + '" style="font-weight:600">' + cell(l.company) + '</td>' +
+        '<td title="' + escA(l.name) + '">' + cell(l.name) + (l.designation ? ' <span style="color:var(--text-muted)">· ' + esc(l.designation) + '</span>' : '') + '</td>' +
+        '<td title="' + escA(l.department) + '">' + cell(l.department) + '</td>' +
+        '<td title="' + escA(l.phone) + '">' + cell(l.phone) + '</td>' +
+        '<td title="' + escA(l.phone2) + '">' + cell(l.phone2) + '</td>' +
+        '<td title="' + escA(l.email) + '">' + cell(l.email) + '</td>' +
+        '<td title="' + escA(l.city) + '">' + cell(l.city) + '</td>' +
+        '<td title="' + escA(l.state) + '">' + cell(l.state) + '</td>' +
+        '<td title="' + escA(l.address) + '">' + cell(l.address) + '</td>' +
+        '<td title="' + escA(l.website) + '">' + cell(l.website) + '</td>' +
+        '<td>' + sel + '</td>' +
         '</tr>';
     }
-    tbl.innerHTML = '<thead><tr>' +
-      '<th>Sl. No</th><th>Customer</th><th>Visitor Name</th><th>Department</th>' +
-      '<th>Mobile 1</th><th>Mobile 2</th><th>Email</th><th>City</th><th>State</th>' +
-      '<th>Address</th><th>Website</th><th>Follow-up</th>' +
-      '</tr></thead><tbody>' + rows + '</tbody>';
+    tbl.innerHTML = '<colgroup>' + this.COLS.map(function () { return '<col>'; }).join('') + '</colgroup>' +
+      '<thead><tr>' + head + '</tr></thead><tbody>' + rows + '</tbody>';
+    this.applyWidths();
+    // Bottom scrollbar mirror — synced both ways with the table container
+    var wrap = document.getElementById('cmWrap');
+    var hbar = document.getElementById('cmHscroll');
+    if (wrap && hbar) {
+      var inner = document.getElementById('cmHscrollInner');
+      if (inner) inner.style.width = Math.max(wrap.scrollWidth, 1) + 'px';
+      wrap.onscroll = function () { if (hbar.scrollLeft !== wrap.scrollLeft) hbar.scrollLeft = wrap.scrollLeft; };
+      hbar.onscroll = function () { if (wrap.scrollLeft !== hbar.scrollLeft) wrap.scrollLeft = hbar.scrollLeft; };
+    }
+  },
+
+  /** Tap a column header to sort by it; tap again to reverse. */
+  sortBy(key) {
+    if (Date.now() - this._lastResize < 350) return; // ignore the click right after a column drag
+    if (this.sortKey === key) this.sortDir = (this.sortDir === 1 ? -1 : 1);
+    else { this.sortKey = key; this.sortDir = 1; }
+    this.render();
+  },
+
+  /** Update a lead's follow-up status right in the sheet. */
+  async setFollowUp(id, value) {
+    var lead = null;
+    for (var i = 0; i < (this._leads || []).length; i++) { if (this._leads[i].id === id) { lead = this._leads[i]; break; } }
+    if (!lead) return;
+    var old = lead.followUpStatus || '';
+    lead.followUpStatus = value;
+    lead.updatedAt = new Date().toISOString();
+    try {
+      await dbPut('leads', lead);
+      App.toast('Follow-up updated: ' + (value || '—'), 'success');
+    } catch (e) {
+      lead.followUpStatus = old;
+      this.render();
+      App.toast('Could not update follow-up — check your connection', 'error');
+    }
+  },
+
+  /** Drag a column's edge to resize it, Excel-style. Widths are remembered. */
+  startResize(e, idx) {
+    e.preventDefault();
+    e.stopPropagation();
+    var self = this;
+    var startX = e.clientX;
+    var startW = this.colWidths[idx];
+    function onMove(ev) {
+      var w = startW + (ev.clientX - startX);
+      self.colWidths[idx] = Math.max(50, w);
+      self.applyWidths();
+    }
+    function onUp() {
+      self._lastResize = Date.now();
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      try { localStorage.setItem('cm_col_widths', JSON.stringify(self.colWidths)); } catch (er) { }
+    }
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  },
+
+  applyWidths() {
+    var tbl = document.getElementById('cmTable');
+    if (!tbl || !this.colWidths) return;
+    var cols = tbl.querySelectorAll('col');
+    var total = 0;
+    for (var i = 0; i < cols.length && i < this.colWidths.length; i++) {
+      cols[i].style.width = this.colWidths[i] + 'px';
+      total += this.colWidths[i];
+    }
+    tbl.style.width = total + 'px';
+    var wrap = document.getElementById('cmWrap');
+    var inner = document.getElementById('cmHscrollInner');
+    if (wrap && inner) inner.style.width = Math.max(wrap.scrollWidth, 1) + 'px';
   }
 };
 
