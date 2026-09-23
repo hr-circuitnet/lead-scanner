@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v57';
+const APP_VERSION = 'circuitnet-v58';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -1289,6 +1289,7 @@ const App = {
     if (view === 'dashboard') Dashboard.render();
     else if (view === 'scan') { Scanner.start(); }
     else if (view === 'leads') Leads.render();
+    else if (view === 'customermaster') CustomerMaster.render();
     else if (view === 'manual') ManualForm.render();
     else if (view === 'export') {
       Export.init();
@@ -3933,6 +3934,56 @@ const ManualForm = {
 };
 
 /* ========================= LEADS LIST ========================= */
+/* ========================= CUSTOMER MASTER ========================= */
+/* One spreadsheet-style row per lead of the selected expo: Sl.No,
+   Customer, Visitor Name, Department, Mobile 1 / 2, Email, City, State,
+   Address, Website and Follow-up status. Single page, vertical scroll
+   bar on the right; tapping a row opens the lead details. */
+const CustomerMaster = {
+  async render() {
+    var tbl = document.getElementById('cmTable');
+    if (!tbl) return;
+    var leads = await Leads.getFiltered();
+    var evtName = (App.currentEvent && App.currentEvent.name) ? App.currentEvent.name : 'Default Event';
+    var sub = document.getElementById('cmSubtitle');
+    if (sub) sub.textContent = evtName + ' — ' + leads.length + ' customer' + (leads.length === 1 ? '' : 's') + ' · tap a row for full details';
+    if (leads.length === 0) {
+      tbl.innerHTML = '<tr><td style="padding:24px;text-align:center;color:var(--text-muted)">No leads captured for this expo yet</td></tr>';
+      return;
+    }
+    var rows = '';
+    for (var i = 0; i < leads.length; i++) {
+      var l = leads[i];
+      var st = (l.followUpStatus || '').trim();
+      var badge;
+      if (!st) badge = '<span style="color:var(--text-muted)">—</span>';
+      else if (st === 'Completed') badge = '<span class="cm-badge" style="background:#d4f7dc;color:#1a7f37">✓ ' + esc(st) + '</span>';
+      else if (st === 'In Progress') badge = '<span class="cm-badge" style="background:#dbeafe;color:#1d4ed8">⏳ ' + esc(st) + '</span>';
+      else if (st === 'Cancelled') badge = '<span class="cm-badge" style="background:#f1f1f1;color:#666">✕ ' + esc(st) + '</span>';
+      else badge = '<span class="cm-badge" style="background:#fff3cd;color:#996500">🔔 ' + esc(st) + '</span>';
+      rows += '<tr onclick="Leads.showDetail(\'' + l.id + '\')">' +
+        '<td style="color:var(--text-muted)">' + (i + 1) + '</td>' +
+        '<td style="font-weight:600">' + esc(l.company || '') + '</td>' +
+        '<td>' + esc(l.name || '') + (l.designation ? ' <span style="color:var(--text-muted)">· ' + esc(l.designation) + '</span>' : '') + '</td>' +
+        '<td>' + esc(l.department || '—') + '</td>' +
+        '<td>' + esc(l.phone || '') + '</td>' +
+        '<td>' + esc(l.phone2 || '') + '</td>' +
+        '<td>' + esc(l.email || '') + '</td>' +
+        '<td>' + esc(l.city || '—') + '</td>' +
+        '<td>' + esc(l.state || '—') + '</td>' +
+        '<td>' + esc(l.address || '—') + '</td>' +
+        '<td>' + esc(l.website || '') + '</td>' +
+        '<td>' + badge + '</td>' +
+        '</tr>';
+    }
+    tbl.innerHTML = '<thead><tr>' +
+      '<th>Sl. No</th><th>Customer</th><th>Visitor Name</th><th>Department</th>' +
+      '<th>Mobile 1</th><th>Mobile 2</th><th>Email</th><th>City</th><th>State</th>' +
+      '<th>Address</th><th>Website</th><th>Follow-up</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody>';
+  }
+};
+
 const Leads = {
   currentFilter: '',
   searchQuery: '',

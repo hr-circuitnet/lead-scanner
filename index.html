@@ -88,6 +88,14 @@ a{text-decoration:none;color:inherit}
 .drawer-item .di-icon{font-size:20px;width:24px;text-align:center}
 .drawer-divider{height:1px;background:var(--border);margin:8px 20px}
 .drawer-item.danger{color:var(--danger)}
+.cm-wrap{border:1px solid var(--border);border-radius:12px;overflow:auto;max-height:calc(100vh - 200px);background:#fff;-webkit-overflow-scrolling:touch}
+.cm-table{border-collapse:collapse;width:100%;font-size:12.5px;min-width:1300px}
+.cm-table th{position:sticky;top:0;background:var(--primary);color:#fff;padding:10px 8px;text-align:left;font-size:11.5px;font-weight:600;white-space:nowrap;z-index:2}
+.cm-table td{padding:8px;border-bottom:1px solid var(--border);white-space:nowrap;vertical-align:top;color:var(--text)}
+.cm-table tbody tr{cursor:pointer}
+.cm-table tbody tr:nth-child(even){background:rgba(0,0,0,.025)}
+.cm-table tbody tr:active{background:var(--primary-light)}
+.cm-badge{display:inline-block;padding:3px 8px;border-radius:10px;font-size:11px;font-weight:600}
 
 /* Views */
 .view{display:none;padding:16px;padding-bottom:80px;animation:fadeIn .2s}
@@ -378,6 +386,7 @@ a{text-decoration:none;color:inherit}
       <div class="drawer-item" onclick="App.navigate('manual')"><span class="di-icon">✍️</span> Manual Entry</div>
       <div class="drawer-item" onclick="document.getElementById('cardScanInput').click()"><span class="di-icon">🪪</span> Scan Visiting Card</div>
       <div class="drawer-item" onclick="App.navigate('leads')"><span class="di-icon">📋</span> View Leads</div>
+      <div class="drawer-item" onclick="App.navigate('customermaster')"><span class="di-icon">🗂️</span> Customer Master</div>
       <div class="drawer-item" onclick="App.showProfileModal()"><span class="di-icon">👤</span> My Profile</div>
       <div class="drawer-item" onclick="App.navigate('export')"><span class="di-icon">📤</span> Export</div>
       <div class="drawer-item" onclick="App.navigate('trash')"><span class="di-icon">🗑️</span> Trash</div>
@@ -477,6 +486,15 @@ a{text-decoration:none;color:inherit}
       <h2 style="flex:1">Lead Details</h2>
     </div>
     <div id="detailContainer"></div>
+  </div>
+
+  <!-- ===== CUSTOMER MASTER ===== -->
+  <div class="view" id="view-customermaster">
+    <h2 style="margin-bottom:4px">🗂️ Customer Master</h2>
+    <div id="cmSubtitle" style="font-size:13px;color:var(--text-muted);margin-bottom:12px"></div>
+    <div class="cm-wrap">
+      <table class="cm-table" id="cmTable"></table>
+    </div>
   </div>
 
   <!-- ===== TRASH ===== -->
@@ -675,11 +693,11 @@ a{text-decoration:none;color:inherit}
     <div class="form-card">
       <h3>🔄 Recent Updates</h3>
       <div style="font-size:12px;color:#555;line-height:1.7">
+        <p style="margin:0 0 8px"><b>v58</b> — Customer Master in the side menu: a single-page spreadsheet of every lead for the selected expo — serial number, customer, visitor name, department, mobiles, email, city, state, address, website and follow-up status, one row per customer with a scroll bar on the right.</p>
         <p style="margin:0 0 8px"><b>v57</b> — Fixed the Push to Database failure: columns with numbers in their name (phone2, phone3, email2...) are now handled correctly when missing from the database, instead of aborting the save. Leads with second phone numbers now save and push like any other.</p>
         <p style="margin:0 0 8px"><b>v56</b> — Push to Database made reliable: the real error is now shown and logged instead of a generic network error, leads are pushed in the same format as normal saves, and a fallback insert is tried when the first attempt is rejected.</p>
         <p style="margin:0 0 8px"><b>v55</b> — Login now works on restricted WiFi networks: sign-in retries automatically, falls back to a cached user list when the network blocks the database, and explains exactly what is wrong and what to do.</p>
         <p style="margin:0 0 8px"><b>v54</b> — Badge text reading now handles names and companies that span multiple printed lines — a two-line name or a two-line company is joined into one instead of being cut off.</p>
-        <p style="margin:0 0 8px"><b>v53</b> — Badge scans now capture the printed badge information — visitor name, company, badge number and visitor category — and store it separately from the QR code data.</p>
       </div>
     </div>
 
