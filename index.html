@@ -556,6 +556,19 @@ a{text-decoration:none;color:inherit}
       <h3>Summary</h3>
       <div id="exportSummary" style="font-size:14px;color:var(--text-muted)">Select filters and tap an export option above.</div>
     </div>
+
+    <div class="export-card admin-only">
+      <h3>📥 Import from Excel — Overwrite Leads</h3>
+      <p style="font-size:13px;color:var(--text-muted);line-height:1.5;margin-bottom:10px">
+        Correct the data in the exported Excel file, then import it back here. Rows are matched by
+        <b>Lead ID</b> — existing leads are <b>overwritten</b> in the central database. A cell you
+        clear in Excel clears the value in the database. Rows without a Lead ID are added as new leads.
+        You can export, correct and re-import as many times as you like.
+      </p>
+      <input type="file" id="importLeadsFile" accept=".xlsx,.xls" style="display:none" onchange="Export.importLeadsFile(this)">
+      <button class="btn btn-primary" style="width:auto;padding:12px 18px" onclick="document.getElementById('importLeadsFile').click()">Choose Excel File...</button>
+      <div id="importLeadsStatus" style="margin-top:10px;font-size:13px"></div>
+    </div>
   </div>
 
   <!-- ===== EVENT MANAGEMENT ===== -->
@@ -704,11 +717,11 @@ a{text-decoration:none;color:inherit}
     <div class="form-card">
       <h3>🔄 Recent Updates</h3>
       <div style="font-size:12px;color:#555;line-height:1.7">
+        <p style="margin:0 0 8px"><b>v61</b> — Excel round-trip: export the leads to Excel, correct the data in the sheet, and import it back to overwrite the central database. Rows are matched by Lead ID, cleared cells clear the value, and rows without a Lead ID are added as new leads. Import as many times as needed.</p>
         <p style="margin:0 0 8px"><b>v60</b> — Customer Master is now a full spreadsheet: follow-up status can be updated right in the sheet with a dropdown, every column sorts by tapping its header, column widths can be dragged bigger or smaller (and are remembered), and a dedicated scroll bar below the table reaches all columns.</p>
         <p style="margin:0 0 8px"><b>v59</b> — The app now checks for new versions automatically every time it opens, so updates reach every device on their own — no more missing menu items because a phone kept running an old cached version.</p>
         <p style="margin:0 0 8px"><b>v58</b> — Customer Master in the side menu: a single-page spreadsheet of every lead for the selected expo — serial number, customer, visitor name, department, mobiles, email, city, state, address, website and follow-up status, one row per customer with a scroll bar on the right.</p>
         <p style="margin:0 0 8px"><b>v57</b> — Fixed the Push to Database failure: columns with numbers in their name (phone2, phone3, email2...) are now handled correctly when missing from the database, instead of aborting the save. Leads with second phone numbers now save and push like any other.</p>
-        <p style="margin:0 0 8px"><b>v56</b> — Push to Database made reliable: the real error is now shown and logged instead of a generic network error, leads are pushed in the same format as normal saves, and a fallback insert is tried when the first attempt is rejected.</p>
       </div>
     </div>
 

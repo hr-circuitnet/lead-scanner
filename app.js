@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v60';
+const APP_VERSION = 'circuitnet-v61';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -313,12 +313,15 @@ const Cloud = {
     return rows.map(function(r){ return toCamelKeys(r); });
   },
 
-  async upsert(table, row, conflictCol) {
+  async upsert(table, row, conflictCol, keepEmpty) {
     var col = conflictCol || 'id';
     var payload = toLowerKeys(row);
-    // Strip empty/null values to reduce chance of schema mismatch
+    // Strip empty/null values to reduce chance of schema mismatch.
+    // keepEmpty (used by the Excel import) keeps '' values so that a
+    // cell the user cleared really clears the field in the database.
     for (var k in payload) {
-      if (payload[k] === null || payload[k] === undefined || payload[k] === '') delete payload[k];
+      if (payload[k] === null || payload[k] === undefined) delete payload[k];
+      else if (payload[k] === '' && !keepEmpty) delete payload[k];
     }
     // Pre-strip known potentially-missing columns to reduce 400 errors
     // These columns may not exist in older Supabase schemas
@@ -4673,14 +4676,14 @@ const Export = {
     const leads = await this.getFiltered();
     if (leads.length === 0) { App.toast('No leads to export with current filters', 'error'); return; }
 
-    const headers = ['Lead ID','Date','Time','Salesperson','Event','Visitor Name','Designation','Department','Company','Mobile','Mobile 2','Mobile 3','Mobile 4','Mobile 5','Email','Country','City','State','PIN/ZIP','Address','Badge ID','LinkedIn','Website','Raw Badge Data','Raw OCR Data','Date of Capture','Visitor Type','Lead Source','Priority','Interest','Volume','Timeline','Customer Requirement','Follow-up','Follow-up Date','Follow-up Type','Follow-up Status','Remarks','Created At','Updated At','Synced At','Sync Status'];
+    const headers = ['Lead ID','Date','Time','Salesperson','Event','Visitor Name','Designation','Department','Company','Mobile','Mobile 2','Mobile 3','Mobile 4','Mobile 5','Email','Email 2','Country','City','State','PIN/ZIP','Address','Badge ID','LinkedIn','Website','Raw Badge Data','Raw OCR Data','Date of Capture','Visitor Type','Lead Source','Priority','Interest','Volume','Timeline','Customer Requirement','Follow-up','Follow-up Date','Follow-up Type','Follow-up Status','Remarks','Created At','Updated At','Synced At','Sync Status','Event ID'];
 
     const rows = leads.map(l => [
       l.id||'', l.date||'', l.time||'', l.salesperson||'',
       l.eventName||'',
       l.name||'', l.designation||'', l.department||'', l.company||'',
       l.phone||'', l.phone2||'', l.phone3||'', l.phone4||'', l.phone5||'',
-      l.email||'', l.country||'', l.city||'', l.state||'', l.pincode||'', l.address||'',
+      l.email||'', l.email2||'', l.country||'', l.city||'', l.state||'', l.pincode||'', l.address||'',
       l.badgeId||'', l.linkedin||'', l.website||'', l.rawBadgeData||'',
       l.rawOcrData||'', l.captureDate||'',
       l.visitorType||'',
@@ -4688,7 +4691,7 @@ const Export = {
       l.volume||'', l.timeline||'', l.customerRequirement||'',
       l.followUp||'', l.followUpDate||'', l.followUpType||'',
       l.followUpStatus||'', l.remarks||'',
-      l.createdAt||'', l.updatedAt||'', l.syncedAt||'', l.syncStatus||''
+      l.createdAt||'', l.updatedAt||'', l.syncedAt||'', l.syncStatus||'', l.eventId||''
     ]);
 
     const ts = new Date().toISOString().slice(0,16).replace(/[-:T]/g,'');
@@ -4714,6 +4717,90 @@ const Export = {
       const blob = new Blob([wbout], { type:'application/octet-stream' });
       this.download(blob, filename + '.xlsx');
       App.toast(`Exported ${leads.length} leads to Excel`, 'success');
+    }
+  },
+
+  /** Pick the Excel file for import (admin only). */
+  importLeadsFile(input) {
+    var file = input.files && input.files[0];
+    input.value = '';
+    if (!file) return;
+    if (!currentUser || currentUser.role !== 'admin') { App.toast('Only an admin can import leads', 'error'); return; }
+    var self = this;
+    var reader = new FileReader();
+    reader.onload = function(e) { self.processImportWorkbook(e.target.result, file.name); };
+    reader.onerror = function() { App.toast('Could not read the file', 'error'); };
+    reader.readAsArrayBuffer(file);
+  },
+
+  /** Read an exported Excel file and OVERWRITE the matching leads in
+   *  the central database (matched by Lead ID; blank Lead ID = new). */
+  async processImportWorkbook(data, fname) {
+    var statusEl = document.getElementById('importLeadsStatus');
+    var setStatus = function(htmlStr) { if (statusEl) statusEl.innerHTML = htmlStr; };
+    try {
+      var wb = XLSX.read(data, { type: 'array' });
+      var ws = wb.Sheets[wb.SheetNames[0]];
+      var rows = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false });
+      if (!rows.length) { setStatus('<span style="color:var(--danger)">The file has no data rows.</span>'); return; }
+      // Header name -> lead field (matched case-insensitively)
+      var map = {
+        'lead id':'id','date':'date','time':'time','salesperson':'salesperson','event':'eventName','event id':'eventId',
+        'visitor name':'name','designation':'designation','department':'department','company':'company',
+        'mobile':'phone','mobile 2':'phone2','mobile 3':'phone3','mobile 4':'phone4','mobile 5':'phone5',
+        'email':'email','email 2':'email2','country':'country','city':'city','state':'state','pin/zip':'pincode','address':'address',
+        'badge id':'badgeId','linkedin':'linkedin','website':'website',
+        'raw badge data':'rawBadgeData','raw ocr data':'rawOcrData','date of capture':'captureDate',
+        'visitor type':'visitorType','lead source':'leadSource','priority':'priority','interest':'interest',
+        'volume':'volume','timeline':'timeline','customer requirement':'customerRequirement',
+        'follow-up':'followUp','follow-up date':'followUpDate','follow-up type':'followUpType','follow-up status':'followUpStatus',
+        'remarks':'remarks','created at':'createdAt','updated at':'updatedAt','synced at':'syncedAt','sync status':'syncStatus'
+      };
+      var leads = [];
+      var newCount = 0, skipCount = 0;
+      for (var i = 0; i < rows.length; i++) {
+        var src = {};
+        var keys = Object.keys(rows[i]);
+        for (var k = 0; k < keys.length; k++) {
+          var lk = keys[k].toLowerCase().replace(/\s+/g, ' ').trim();
+          if (map[lk]) src[map[lk]] = String(rows[i][keys[k]] == null ? '' : rows[i][keys[k]]).trim();
+        }
+        if (!src.name && !src.company) { skipCount++; continue; }
+        if (!src.id) { src.id = App.generateLeadId(); newCount++; }
+        if (!src.eventId) src.eventId = App.currentEvent ? App.currentEvent.id : 'evt-1';
+        if (!src.eventName) src.eventName = App.currentEvent ? App.currentEvent.name : '';
+        if (!src.createdAt) src.createdAt = new Date().toISOString();
+        src.updatedAt = new Date().toISOString();
+        leads.push(src);
+      }
+      if (!leads.length) { setStatus('<span style="color:var(--danger)">No usable rows found — the file needs a header row and lead data.</span>'); return; }
+      var msg = 'Import ' + leads.length + ' lead(s) from ' + fname + '?\n\n' +
+        (leads.length - newCount) + ' existing lead(s) will be OVERWRITTEN in the central database' +
+        (newCount ? ' and ' + newCount + ' new lead(s) will be added' : '') +
+        (skipCount ? '.\n' + skipCount + ' row(s) without a name and company were skipped.' : '') + '.\n\nThis cannot be undone. Continue?';
+      if (!confirm(msg)) { setStatus('Import cancelled.'); return; }
+      var done = 0, failed = 0;
+      for (var j = 0; j < leads.length; j++) {
+        try {
+          await Cloud.upsert('leads', leads[j], 'id', true);
+          done++;
+        } catch (err) {
+          Cloud.log('\u26a0\ufe0f Import failed for lead ' + leads[j].id + ': ' + (err && err.message ? err.message : err));
+          failed++;
+        }
+        setStatus('Importing... ' + (done + failed) + ' / ' + leads.length);
+      }
+      invalidateCache('leads');
+      Cloud.sync();
+      if (failed === 0) {
+        setStatus('<span style="color:var(--success)">\u2705 Import complete — ' + done + ' lead(s) written to the database (' + (done - newCount) + ' overwritten, ' + newCount + ' new).</span>');
+        App.toast('Import complete: ' + done + ' leads written', 'success');
+      } else {
+        setStatus('<span style="color:var(--danger)">Import finished — ' + done + ' written, ' + failed + ' failed (network or database error). Already-imported rows are safe; fix your connection and re-import the file.</span>');
+        App.toast(done + ' imported, ' + failed + ' failed', 'error');
+      }
+    } catch (e) {
+      setStatus('<span style="color:var(--danger)">Could not read the Excel file: ' + (e && e.message ? e.message : e) + '</span>');
     }
   },
 
