@@ -5,7 +5,7 @@
 
 const DB_NAME = 'CircuitNetDB';
 const DB_VERSION = 2;
-const APP_VERSION = 'circuitnet-v61';
+const APP_VERSION = 'circuitnet-v62';
 const DEFAULT_CATEGORIES = ['PCB Manufacturing','Multilayer PCB','High-TG','RF/High Frequency','Flex','Rigid-Flex','HDI','Metal Core','Ceramic','PCB Assembly','Prototype','Volume Production','PCB Testing/Lab','Other'];
 const DEFAULT_VOLUMES = ['Prototype','Small','Medium','High','Unknown'];
 const DEFAULT_TIMELINES = ['Immediate','1 Month','1–3 Months','3–6 Months','>6 Months','Unknown'];
@@ -347,6 +347,8 @@ const Cloud = {
       var m = body.match(/'([a-z0-9_]+)' column/);
       if (!m) throw new Error('upsert ' + table + ': ' + resp.status + ' ' + body);
       this.log('⚠️ Column ' + m[1] + ' not in Supabase schema — retrying without it');
+      if (!this.strippedCols) this.strippedCols = {};
+      this.strippedCols[m[1]] = true;
       delete payload[m[1]];
     }
     throw new Error('upsert ' + table + ': failed after ' + maxRetries + ' retries');
@@ -417,6 +419,8 @@ const Cloud = {
       var m = body.match(/'([a-z0-9_]+)' column/);
       if (!m) throw new Error('insert ' + table + ': ' + resp.status + ' ' + body);
       this.log('⚠️ Column ' + m[1] + ' not in Supabase schema — retrying without it');
+      if (!this.strippedCols) this.strippedCols = {};
+      this.strippedCols[m[1]] = true;
       delete payload[m[1]];
     }
     throw new Error('insert ' + table + ': failed after ' + maxRetries + ' retries');
@@ -4780,6 +4784,7 @@ const Export = {
         (skipCount ? '.\n' + skipCount + ' row(s) without a name and company were skipped.' : '') + '.\n\nThis cannot be undone. Continue?';
       if (!confirm(msg)) { setStatus('Import cancelled.'); return; }
       var done = 0, failed = 0;
+      Cloud.strippedCols = {};
       for (var j = 0; j < leads.length; j++) {
         try {
           await Cloud.upsert('leads', leads[j], 'id', true);
@@ -4791,12 +4796,41 @@ const Export = {
         setStatus('Importing... ' + (done + failed) + ' / ' + leads.length);
       }
       invalidateCache('leads');
+      // Read the leads back from the database and verify the import landed
+      var verified = -1;
+      try {
+        var allLeads = await dbGetAll('leads');
+        var have = {};
+        for (var vi = 0; vi < allLeads.length; vi++) have[allLeads[vi].id] = true;
+        verified = 0;
+        for (var vj = 0; vj < leads.length; vj++) { if (have[leads[vj].id]) verified++; }
+      } catch (ve) { verified = -1; }
+      // Which columns from the Excel file were dropped because the
+      // database table does not have them?
+      var stripped = [];
+      if (Cloud.strippedCols) { for (var sc in Cloud.strippedCols) stripped.push(sc); }
+      Cloud.strippedCols = {};
+      var warnHtml = '';
+      if (stripped.length) {
+        warnHtml = '<div style="margin-top:10px;padding:10px;border:1px solid #f59e0b;border-radius:8px;background:#fff8e1;font-size:12px;line-height:1.6">' +
+          '<b>ATTENTION: ' + stripped.length + ' column(s) from your file do not exist in the database and were NOT saved:</b> ' + esc(stripped.join(', ')) + '. ' +
+          'Corrections made in these columns were dropped! Run this once in the Supabase SQL Editor, then import the same file again:' +
+          '<br><span style="font-family:monospace;font-size:11px">' +
+          stripped.map(function(c){ return 'ALTER TABLE leads ADD COLUMN IF NOT EXISTS ' + c + ' text;'; }).join('<br>') + '</span></div>';
+      }
+      var verifyHtml = '';
+      if (verified >= 0) {
+        verifyHtml = (verified === leads.length)
+          ? '<div style="margin-top:8px;font-size:12px;color:var(--success)">Verified: all ' + verified + ' imported lead(s) are in the database now.</div>'
+          : '<div style="margin-top:8px;font-size:12px;color:var(--danger)">Warning: only ' + verified + ' of ' + leads.length + ' imported leads were found when re-reading the database.</div>';
+      }
       Cloud.sync();
       if (failed === 0) {
-        setStatus('<span style="color:var(--success)">\u2705 Import complete — ' + done + ' lead(s) written to the database (' + (done - newCount) + ' overwritten, ' + newCount + ' new).</span>');
-        App.toast('Import complete: ' + done + ' leads written', 'success');
+        setStatus('<span style="color:var(--success)">Import complete — ' + done + ' lead(s) written to the database (' + (done - newCount) + ' overwritten, ' + newCount + ' new).</span>' + verifyHtml + warnHtml);
+        if (stripped.length) App.toast('Import complete, BUT ' + stripped.length + ' column(s) were not saved — see details below', 'error', 8000);
+        else App.toast('Import complete: ' + done + ' leads written', 'success');
       } else {
-        setStatus('<span style="color:var(--danger)">Import finished — ' + done + ' written, ' + failed + ' failed (network or database error). Already-imported rows are safe; fix your connection and re-import the file.</span>');
+        setStatus('<span style="color:var(--danger)">Import finished — ' + done + ' written, ' + failed + ' failed (network or database error). Already-imported rows are safe; fix your connection and re-import the file.</span>' + verifyHtml + warnHtml);
         App.toast(done + ' imported, ' + failed + ' failed', 'error');
       }
     } catch (e) {
